@@ -104,3 +104,8 @@ Node 客户端为 `xhs_reception/engine_client.cjs`，只连接已有 SQLite 的
 ## 账号 B 迁移
 
 使用私有 Git 仓库迁移 `reception_v2/` 源码与规则，每台电脑独立保存 `.runtime`、浏览器登录态和账号配置。完整步骤见 `reception_v2/README.md` 的“迁移到另一台电脑并切换 B 账号”。
+
+
+## B 电脑一键部署
+
+B 电脑只需克隆仓库，然后让 Codex 读取 `BOOTSTRAP_B.md` 完成登录、配置、只读验收、客户试点和独立 LaunchAgent 安装。
