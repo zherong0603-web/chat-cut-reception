@@ -1,0 +1,13 @@
+{
+  "accountId": "222222222222222222222222",
+  "accountName": "B账号显示名",
+  "runtimeDir": ".runtime-b",
+  "businessFacts": "reception_v2/config/business-facts.json",
+  "card": {
+    "title": "企微_B账号（企微）",
+    "visibleName": "B账号（企微）",
+    "id": "替换为B账号原生卡片ID",
+    "csaAccountNo": "替换为B账号原生csaAccountNo",
+    "corpName": "@替换为B账号原生企业名"
+  }
+}

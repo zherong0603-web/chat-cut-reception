@@ -1,0 +1,10 @@
+{
+  "approved": true,
+  "approval_basis": "用户于2026-10-27明确表示已发送的美国/墨西哥、头程、海外仓储、转运、一件代发、尾程配送和多平台订单处理话术与企微卡方案不错",
+  "account_name": "运去哪海外仓",
+  "supported_regions": ["美国", "墨西哥"],
+  "unsupported_regions": ["日本"],
+  "service_capabilities": ["头程运输", "海外仓储", "转运", "一件代发", "尾程配送", "多平台订单处理", "可视化管理"],
+  "unsupported_services": ["个人快递", "个人寄件", "个人邮寄", "个人包裹", "个人转运", "个人代购"],
+  "qualification_fields": ["目的国或仓库", "货品类型", "预计件量", "货品尺寸重量", "所需服务"]
+}
