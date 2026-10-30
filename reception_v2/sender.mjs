@@ -17,6 +17,7 @@ export function verifyNativeHistory(intent, receipt, sourcePlatformTimeMs, submi
   return receipt.type === 'TEXT' && normalized(receipt.content) === normalized(intent.content);
 }
 
+function isOutsideReplyWindow(error){return error?.code==='outside_reply_hours'||/outside_reply_hours/.test(String(error?.message||''));}
 function isPlatformBlock(error) {
   return error?.code === 'platform_blocked' || /platform_blocked|发送受限|无法发送/.test(String(error?.message || ''));
 }
@@ -111,6 +112,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
       const initial = await finalize(intentId, scope, sourcePlatformTimeMs, receipt, startedAtMs);
       return await retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial);
     } catch (error) {
+      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};
       if (isPlatformBlock(error)) return { state: 'send_blocked', intent: store.markFailed(intentId, 'platform_blocked') };
       return { state: 'uncertain', intent: store.markUncertain(intentId, { error: error?.message || 'send_error' }) };
     }
@@ -133,6 +135,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
       const initial = await finalize(intentId, scope, sourcePlatformTimeMs, receipt, startedAtMs);
       return await retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial);
     } catch (error) {
+      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};
       if (isPlatformBlock(error)) return { state: 'send_blocked', intent: store.markFailed(intentId, 'platform_blocked') };
       return { state: 'uncertain', intent: store.markUncertain(intentId, { error: error?.message || 'send_error' }) };
     }
@@ -158,6 +161,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     const textStartedAtMs = now(); store.markSending(textIntentId, textStartedAtMs);
     try { await browser.clickTextSend(scope); }
     catch (error) {
+      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',text:{state:'failed',intent:store.markFailed(textIntentId,'outside_reply_hours')},card:null};
       if (isPlatformBlock(error)) return { state: 'send_blocked', text: { state: 'send_blocked', intent: store.markFailed(textIntentId, 'platform_blocked') }, card: null };
       store.markUncertain(textIntentId, { error: error?.message || 'send_error' });
       return { state: 'uncertain', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: null };
@@ -168,6 +172,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     try { await browser.sendCard(scope); }
     catch (error) {
       store.markUncertain(textIntentId, { error: 'card_send_failed_after_text_submit' });
+      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',text:{state:'uncertain',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.markFailed(cardIntentId,'outside_reply_hours')},withinTwoSeconds:false,withinThreeSeconds:false};
       if (isPlatformBlock(error)) return { state: 'send_blocked', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: { state: 'send_blocked', intent: store.markFailed(cardIntentId, 'platform_blocked') } };
       store.markUncertain(cardIntentId, { error: error?.message || 'send_error' });
       return { state: 'uncertain', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: { state: 'uncertain', intent: store.getIntent(cardIntentId) } };

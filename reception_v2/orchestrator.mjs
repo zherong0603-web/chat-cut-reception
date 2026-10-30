@@ -70,6 +70,7 @@ export function createOrchestrator(deps) {
   const setBaseline=rows=>{state.seen=new Map((rows||[]).map(row=>[row.uid,fingerprint(row)]));state.replyCheckAt=new Map((rows||[]).filter(row=>row.needsReply===true).map(row=>[row.uid,clock()+1000]));};
   const sleep=deps.sleep||(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
   const stopping=()=>deps.isStopping?.()===true;
+  const isOutsideReplyWindowError=error=>error?.code==='outside_reply_hours'||/outside_reply_hours/.test(String(error?.message||error));
   const isTransientTakeoverError=error=>/outside_reply_hours|native_takeover_control_required|exact_visible_customer_row_required|target_message_dom_not_hydrated|selected_scope_mismatch|scope_not_ready|page_not_visible/.test(String(error?.message||error));
   const enqueue=async input=>stopping()?null:deps.notifier.enqueue(input);
   const notifyBlocked=async input=>stopping()?null:deps.notifier.notifyBlocked(input);
@@ -221,14 +222,20 @@ export function createOrchestrator(deps) {
         if(textResult.state!=='uncertain'&&cardResult?.state!=='uncertain')break;
         if(!acquisitionRetryAllowed||!replyWindow().allowed)break;
         if(textResult.state==='uncertain'){
+          if(!replyWindow().allowed)break;
           const prior=new Set(deps.store.listConversationOutboundTexts(scope.accountId,scope.conversationId));
           const content=retryPhrases.find(value=>!prior.has(value))||`${reply.text} 这边直接帮您对接～`;
           const retryIntent=deps.store.createIntent({turnId:turn.turnId,kind:'text',content,maxAttempts:6});
-          textResult=await deps.sender.sendText(retryIntent.intentId,scope,turn.openedAtMs);
+          try{textResult=await deps.sender.sendText(retryIntent.intentId,scope,turn.openedAtMs);}
+          catch(error){if(!isOutsideReplyWindowError(error))throw error;deps.store.markFailed(retryIntent.intentId,'outside_reply_hours');textResult={state:'outside_reply_hours',intent:deps.store.getIntent(retryIntent.intentId)};}
+          if(textResult.state==='outside_reply_hours')break;
         }
         if(cardResult?.state==='uncertain'&&cardIntent){
+          if(!replyWindow().allowed)break;
           const retryCard=deps.store.createIntent({turnId:turn.turnId,kind:'card',payload:{cardTitle:card.title,retryOf:cardIntent.intentId,retryAttempt},maxAttempts:6});
-          cardResult=await deps.sender.sendWeComCard(retryCard.intentId,scope,turn.openedAtMs);
+          try{cardResult=await deps.sender.sendWeComCard(retryCard.intentId,scope,turn.openedAtMs);}
+          catch(error){if(!isOutsideReplyWindowError(error))throw error;deps.store.markFailed(retryCard.intentId,'outside_reply_hours');cardResult={state:'outside_reply_hours',intent:deps.store.getIntent(retryCard.intentId)};}
+          if(cardResult.state==='outside_reply_hours')break;
         }
       }
       bothWithinTwoSeconds=cardResult&&!cardResult.duplicate?textResult.withinTwoSeconds===true&&cardResult.withinTwoSeconds===true:null;

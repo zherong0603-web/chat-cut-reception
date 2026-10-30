@@ -210,3 +210,10 @@ test('closing reply window during send creates no retry intent',async()=>{
   const o=createOrchestrator({...f.orchestrator.deps,sender,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
   try{const original=f.orchestrator.deps.sender;const pair=sender.sendTextAndCard;sender.sendTextAndCard=async(...args)=>{const result=await pair(...args);allowed=false;return result};const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});assert.equal(result.state,'needs_human');assert.equal(f.store.listIntents(result.turn.turnId).length,2);assert.equal(f.store.listIntents(result.turn.turnId).filter(i=>i.state==='prepared').length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
+
+test('window closing during text retry creates no prepared card retry',async()=>{
+  let allowed=true;const f=fixture();let textRetries=0,cardRetries=0;
+  const sender={enterHumanMode:async()=>({clicked:true}),sendTextAndCard:async(textId,cardId)=>{f.store.markSending(textId,2000);f.store.markUncertain(textId,{error:'pending'});f.store.markSending(cardId,2000);f.store.markUncertain(cardId,{error:'pending'});return{state:'uncertain',text:{state:'uncertain'},card:{state:'uncertain'},withinTwoSeconds:false,withinThreeSeconds:false}},sendText:async()=>{textRetries++;allowed=false;throw new Error('outside_reply_hours')},sendWeComCard:async()=>{cardRetries++;return{state:'sent'}}};
+  const o=createOrchestrator({...f.orchestrator.deps,sender,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
+  try{const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});const intents=f.store.listIntents(result.turn.turnId);assert.equal(textRetries,1);assert.equal(cardRetries,0);assert.equal(intents.filter(i=>i.kind==='card').length,1);assert.equal(intents.filter(i=>i.state==='prepared').length,0);assert.equal(intents.find(i=>i.kind==='text'&&i.intentId!==intents[0].intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
