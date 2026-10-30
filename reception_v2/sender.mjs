@@ -102,6 +102,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     if (afterFill.pageVisible === false) throw new Error('page_not_visible');
     if (afterFill.conversationId && afterFill.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
     if (!afterFill.manual || !afterFill.inputReady) throw new Error('native_manual_mode_required');
+    assertReplyWindow();
     const startedAtMs = now();
     store.markSending(intentId, startedAtMs);
     try {
@@ -123,6 +124,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     if (mode.pageVisible === false) throw new Error('page_not_visible');
     if (mode.conversationId && mode.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
     if (!mode.manual || !mode.inputReady) throw new Error('native_manual_mode_required');
+    assertReplyWindow();
     const startedAtMs = now();
     store.markSending(intentId, startedAtMs);
     try {
@@ -152,6 +154,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
       throw error;
     }
     await assertSafeMode(scope);
+    assertReplyWindow();
     const textStartedAtMs = now(); store.markSending(textIntentId, textStartedAtMs);
     try { await browser.clickTextSend(scope); }
     catch (error) {
@@ -160,6 +163,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
       return { state: 'uncertain', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: null };
     }
     await assertSafeMode(scope);
+    try{assertReplyWindow();}catch(error){store.markUncertain(textIntentId,{error:'reply_window_closed_after_text_submit'});store.markFailed(cardIntentId,'reply_window_closed_before_submit');return {state:'outside_reply_hours',text:{state:'uncertain',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}
     const cardStartedAtMs = now(); store.markSending(cardIntentId, cardStartedAtMs);
     try { await browser.sendCard(scope); }
     catch (error) {

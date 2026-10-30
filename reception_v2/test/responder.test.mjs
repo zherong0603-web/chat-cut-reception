@@ -164,3 +164,24 @@ test('genuine logistics demand is not blocked by peer-service words',()=>{
   const reply=composeReply({customerText:text,facts,nickname:'美国卖家',conversationId:'real-buyer'});
   assert.equal(reply.offerCard,true);assert.equal(reply.nextState,'waiting_contact');
 });
+
+test('natural cooperation and channel requests fail closed before contact or service replies',()=>{
+  for(const text of ['有合作机会吗','合作吗','想合作','我是渠道方','同行交流一下','我们做美线卡派，已加微信，后面合作','我是做海外仓服务的，已经加了，想合作一下']){
+    const intent=classifyIntent({customerText:text,facts,nickname:'普通客户'});assert.equal(intent.kind,'peer_cooperation',text);
+    const reply=composeReply({customerText:text,facts,nickname:'普通客户',conversationId:'natural-peer'});assert.equal(reply.nextState,'stopped');assert.equal(reply.offerCard,false);assert.doesNotMatch(reply.text,/加我企微|客服小姐姐会/);
+  }
+});
+
+test('real seller introductions containing logistics words remain qualified',()=>{
+  for(const text of ['我是做跨境电商的，需要美国尾程派送报价','我是做独立站的，想了解尾程物流和一件代发','我们公司做亚马逊，需要跨境物流海外仓']){
+    const intent=classifyIntent({customerText:text,facts,nickname:'跨境卖家'});
+    assert.notEqual(intent.kind,'peer_cooperation',text);
+    const reply=composeReply({customerText:text,facts,nickname:'跨境卖家',conversationId:'real-'+text});assert.equal(reply.offerCard,true,text);
+  }
+});
+
+test('obvious Chinese and English peer profile names are detected',async()=>{
+  const {isPeerProfile}=await import('../responder.mjs');
+  for(const nickname of ['ABC Logistics','Freight Forwarder','Overseas Warehouse','深圳物流公司','美国尾程服务','chenyuanqing全美提柜卡派'])assert.equal(isPeerProfile(nickname),true,nickname);
+  for(const nickname of ['跨境卖家','Amazon Seller','DTC品牌','个人用户'])assert.equal(isPeerProfile(nickname),false,nickname);
+});

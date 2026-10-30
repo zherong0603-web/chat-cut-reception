@@ -25,12 +25,13 @@ function isPersonalShipping(text, facts, history) {
 }
 
 
-const peerProfilePattern = /(?:全美.{0,8}提柜.{0,8}卡派|提柜.{0,8}卡派|尾程.{0,8}提拆派|货代|国际物流|跨境物流|海外仓服务|供应链管理)/i;
-const peerCooperationPattern = /(?:我是|我们是|我司|我们公司).{0,24}(?:做|提供|主营).{0,36}(?:货代|物流|海外仓|供应链|头程|尾程|提柜|卡派|清关|派送)|(?:同行|渠道|代理|资源).{0,12}(?:合作|对接)|(?:找|求).{0,10}(?:货盘|渠道|代理|资源)|(?:合作一下|寻求合作|想和你们合作|可以合作)/i;
+const peerProfilePattern = /(?:全美.{0,8}提柜.{0,8}卡派|提柜.{0,8}卡派|尾程.{0,8}提拆派|尾程服务|货代|国际物流|跨境物流|海外仓服务|海外仓|供应链管理|供应链公司|物流公司|logistics|freight\s*forward(?:er|ing)|overseas\s*warehouse|supply\s*chain)/i;
+const peerProviderPattern = /(?:我是|我们是|我司|我们公司)(?:做|提供|主营)[^，。；,;\n]{0,28}(?:货代|国际物流|跨境物流|海外仓服务|供应链|物流服务|尾程提拆派|尾程派送服务|卡派服务|清关服务)/i;
+const peerCooperationPattern = /合作|渠道方|渠道合作|找渠道|渠道资源|代理合作|资源对接|同行(?:交流|合作|资源)?/i;
 const unsupportedBusinessPattern = /(?:找货盘|货盘资源|要货盘|同行货盘)|(?:个人|私人).{0,8}(?:转运|快递|寄件|邮寄|包裹)|自发货(?:退件)?|移仓.{0,8}换标|换标|其他.{0,8}仓.{0,12}退货|退货.{0,10}(?:其他仓|别的仓)/i;
 
 export function isPeerProfile(nickname){return peerProfilePattern.test(String(nickname||''));}
-export function isPeerCooperation(text,nickname=''){const value=String(text||'');return peerCooperationPattern.test(value)||(isPeerProfile(nickname)&&Boolean(value.trim()));}
+export function isPeerCooperation(text,nickname=''){const value=String(text||'');return peerCooperationPattern.test(value)||peerProviderPattern.test(value)||(isPeerProfile(nickname)&&Boolean(value.trim()));}
 export function isUnsupportedBusiness(text){return unsupportedBusinessPattern.test(String(text||''));}
 
 export function validateFacts(facts) {
@@ -56,9 +57,9 @@ export function classifyIntent({ customerText, facts, history = [], nickname = '
   const text = String(customerText || '');
   const context=customerContext(text,history);
   if (isRefusal(text)) return { kind: 'refusal', confidence: 1 };
-  if (isContactAdded(text)) return { kind: 'contact_added', confidence: 1 };
   if (isPeerCooperation(context,nickname)) return { kind: 'peer_cooperation', confidence: 1 };
   if (isUnsupportedBusiness(context)) return { kind: 'unsupported_business', confidence: 1 };
+  if (isContactAdded(text)) return { kind: 'contact_added', confidence: 1 };
   if (isPersonalShipping(text, facts, history)) return { kind: 'personal_shipping', confidence: 1 };
   if (isIdentityQuestion(text)) return { kind: 'identity', confidence: 1 };
   if (pricePattern.test(text)) return { kind: 'price', confidence: 0.95 };

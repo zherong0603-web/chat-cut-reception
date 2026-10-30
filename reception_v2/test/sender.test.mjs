@@ -119,3 +119,22 @@ test('sender hard-stops before any browser action outside reply hours',async()=>
   const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
   try{await assert.rejects(()=>f.sender.sendText(intent.intentId,f.scope,1000),/outside_reply_hours/);assert.equal(f.store.getIntent(intent.intentId).state,'prepared');assert.equal(f.browser.calls.length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
+
+test('reply window is rechecked immediately before final text and card clicks',async()=>{
+  const f=fixture();let allowed=true;f.sender=createSender({store:f.store,browser:f.browser,now:()=>2000,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed})}});f.browser.state.manual=true;
+  const originalFill=f.browser.fillText;f.browser.fillText=async(...args)=>{const value=await originalFill(...args);allowed=false;return value;};
+  const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
+  try{await assert.rejects(()=>f.sender.sendText(intent.intentId,f.scope,1000),/outside_reply_hours/);assert.equal(f.browser.calls.filter(x=>x==='text').length,0);assert.equal(f.store.getIntent(intent.intentId).state,'prepared');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('pair never clicks the card if the reply window closes after text submission',async()=>{
+  const f=fixture();let allowed=true;f.sender=createSender({store:f.store,browser:f.browser,now:()=>2000,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed})}});f.browser.state.manual=true;
+  const originalClick=f.browser.clickTextSend;f.browser.clickTextSend=async(...args)=>{const value=await originalClick(...args);allowed=false;return value;};
+  const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});const card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+  try{const result=await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.browser.calls.filter(x=>x==='card').length,0);assert.equal(f.store.getIntent(text.intentId).state,'uncertain');assert.equal(f.store.getIntent(card.intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('standalone card rechecks time after mode lookup and before clicking',async()=>{
+  const f=fixture();let allowed=true;f.browser.state.manual=true;f.sender=createSender({store:f.store,browser:f.browser,now:()=>2000,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed})}});const originalMode=f.browser.mode;f.browser.mode=async scope=>{const value=await originalMode(scope);allowed=false;return value;};const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+  try{await assert.rejects(()=>f.sender.sendWeComCard(intent.intentId,f.scope,1000),/outside_reply_hours/);assert.equal(f.browser.calls.filter(x=>x==='card').length,0);assert.equal(f.store.getIntent(intent.intentId).state,'prepared');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
