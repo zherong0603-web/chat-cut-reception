@@ -124,7 +124,7 @@ test('reply window is rechecked immediately before final text and card clicks',a
   const f=fixture();let allowed=true;f.sender=createSender({store:f.store,browser:f.browser,now:()=>2000,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed})}});f.browser.state.manual=true;
   const originalFill=f.browser.fillText;f.browser.fillText=async(...args)=>{const value=await originalFill(...args);allowed=false;return value;};
   const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
-  try{await assert.rejects(()=>f.sender.sendText(intent.intentId,f.scope,1000),/outside_reply_hours/);assert.equal(f.browser.calls.filter(x=>x==='text').length,0);assert.equal(f.store.getIntent(intent.intentId).state,'prepared');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+  try{const result=await f.sender.sendText(intent.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.browser.calls.filter(x=>x==='text').length,0);assert.equal(f.store.getIntent(intent.intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
 test('pair never clicks the card if the reply window closes after text submission',async()=>{
@@ -136,7 +136,7 @@ test('pair never clicks the card if the reply window closes after text submissio
 
 test('standalone card rechecks time after mode lookup and before clicking',async()=>{
   const f=fixture();let allowed=true;f.browser.state.manual=true;f.sender=createSender({store:f.store,browser:f.browser,now:()=>2000,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed})}});const originalMode=f.browser.mode;f.browser.mode=async scope=>{const value=await originalMode(scope);allowed=false;return value;};const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
-  try{await assert.rejects(()=>f.sender.sendWeComCard(intent.intentId,f.scope,1000),/outside_reply_hours/);assert.equal(f.browser.calls.filter(x=>x==='card').length,0);assert.equal(f.store.getIntent(intent.intentId).state,'prepared');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+  try{const result=await f.sender.sendWeComCard(intent.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.browser.calls.filter(x=>x==='card').length,0);assert.equal(f.store.getIntent(intent.intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
 test('DOM-level window close before text click marks text failed, not uncertain',async()=>{
@@ -159,4 +159,10 @@ test('pair entry closes both original intents without leaving prepared rows',asy
   const f=fixture({senderOptions:{replySchedule:{isAllowed:()=>false,state:()=>({allowed:false,reason:'closed'})}}});
   const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});const card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
   try{const result=await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.store.getIntent(text.intentId).state,'failed');assert.equal(f.store.getIntent(card.intentId).state,'failed');assert.equal(f.browser.calls.length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+
+test('pair text DOM click rejected by window marks both original intents failed',async()=>{
+  const f=fixture();f.browser.state.manual=true;f.browser.clickTextSend=async()=>{throw new Error('outside_reply_hours')};const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});const card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+  try{const result=await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.store.getIntent(text.intentId).state,'failed');assert.equal(f.store.getIntent(card.intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
