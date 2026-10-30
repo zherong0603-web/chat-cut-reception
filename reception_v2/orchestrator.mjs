@@ -216,8 +216,10 @@ export function createOrchestrator(deps) {
       }
 
       const retryPhrases=['可以的，您直接加我企微，客服小姐姐会具体回答您～','没问题，直接加我企微就行，客服小姐姐会详细回答您～'];
+      const acquisitionRetryAllowed=reply.offerCard===true&&reply.nextState!==ConversationState.STOPPED;
       for(let retryAttempt=1;retryAttempt<=2;retryAttempt++){
         if(textResult.state!=='uncertain'&&cardResult?.state!=='uncertain')break;
+        if(!acquisitionRetryAllowed||!replyWindow().allowed)break;
         if(textResult.state==='uncertain'){
           const prior=new Set(deps.store.listConversationOutboundTexts(scope.accountId,scope.conversationId));
           const content=retryPhrases.find(value=>!prior.has(value))||`${reply.text} 这边直接帮您对接～`;

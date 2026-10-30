@@ -83,3 +83,22 @@ test('browser launch options use the full Chromium executable instead of old hea
   assert.deepEqual(browserLaunchOptions({chromium,headless:true,env:{}}),{headless:true,executablePath:'/cache/chromium/Google Chrome for Testing'});
   assert.deepEqual(browserLaunchOptions({chromium,headless:false,env:{}}),{headless:false,executablePath:'/cache/chromium/Google Chrome for Testing',args:['--window-position=-10000,-10000']});
 });
+
+test('configured text helper rechecks reply window immediately before DOM click',async()=>{
+  const calls=[];const button={count:async()=>1,isEnabled:async()=>true,click:async()=>calls.push('send')};
+  const root={count:async()=>1,locator(selector){if(selector.includes('.reply-bottom-bar'))return{filter:()=>button};throw new Error('unexpected:'+selector);}};
+  const active={};const page={locator(selector){if(selector.includes('.sx-contact-item.active'))return active;if(selector==='#walle-ad')return{filter:()=>root};throw new Error('unexpected-page:'+selector);}};
+  const {clickConfiguredTextSend}=await import('../browser.mjs');
+  await assert.rejects(()=>clickConfiguredTextSend({page,scope,assertActive:async()=>{},canSend:()=>false}),/outside_reply_hours/);assert.equal(calls.includes('send'),false);
+});
+
+test('configured card helper rechecks reply window after panel preparation',async()=>{
+  const calls=[];const button={count:async()=>1,isEnabled:async()=>true,click:async()=>calls.push('send')};
+  const cardLocator={locator(){return this},count:async()=>1,hover:async()=>calls.push('hover'),getByRole:()=>button};
+  const title={filter(){return this},waitFor:async()=>calls.push('title-visible'),count:async()=>1,locator:()=>cardLocator};
+  const segment={filter(){return this},count:async()=>1,waitFor:async()=>{},click:async()=>calls.push('tab')};
+  const root={count:async()=>1,locator(selector){if(selector.includes('.d-segment-item'))return segment;if(selector.includes('.card-box__content-title'))return title;throw new Error('unexpected:'+selector);}};
+  const active={};const page={locator(selector){if(selector.includes('.sx-contact-item.active'))return active;if(selector==='#walle-ad')return{filter:()=>root};throw new Error('unexpected-page:'+selector);}};
+  const {sendConfiguredWeComCard}=await import('../browser.mjs');
+  await assert.rejects(()=>sendConfiguredWeComCard({page,scope,assertActive:async()=>{},canSend:()=>false}),/outside_reply_hours/);assert.equal(calls.includes('send'),false);
+});

@@ -197,3 +197,16 @@ test('a message change between closed polling and 19:00 is not backfilled',async
   const f=fixture({rows});const o=createOrchestrator({...f.orchestrator.deps,readSidebar:async()=>({rows}),replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
   try{await o.pollOnce();rows[0]={...rows[0],preview:'18:59新消息',time:'18:59:00'};allowed=true;const opening=await o.pollOnce();assert.equal(opening.processed,0);const next=await o.pollOnce();assert.equal(next.processed,0);assert.equal(f.store.listTurns(accountId,u1).length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
+
+test('excluded refusal uncertainty never becomes a WeCom solicitation retry',async()=>{
+  const f=fixture();const text='想和你们合作一下';const scope={accountId,conversationId:u1,nickname:'渠道方',profileFields:[],messages:[{nativeId:'collab',direction:'left',type:'TEXT',text,platformTimeMs:1000,isCustomerText:true}]};let sendCalls=0;
+  const sender={enterHumanMode:async()=>({clicked:true}),sendText:async intentId=>{sendCalls++;return{state:'uncertain',intent:{...f.store.getIntent(intentId),state:'uncertain'}}},sendTextAndCard:async()=>{throw new Error('card_pair_must_not_run')},sendWeComCard:async()=>{throw new Error('card_retry_must_not_run')}};
+  const o=createOrchestrator({...f.orchestrator.deps,sender,selectConversation:async()=>scope});
+  try{const result=await o.processRow({uid:u1,nickname:'渠道方',needsReply:true});assert.equal(result.state,'needs_human');assert.equal(sendCalls,1);assert.equal(f.store.listConversationOutboundTexts(accountId,u1).length,1);const intents=f.store.listIntents(result.turn.turnId);assert.equal(intents.length,1);assert.doesNotMatch(intents[0].content,/加我企微/);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('closing reply window during send creates no retry intent',async()=>{
+  let allowed=true;const f=fixture();const sender={enterHumanMode:async()=>({clicked:true}),sendTextAndCard:async(textId,cardId)=>{f.store.markSending(textId,2000);f.store.markUncertain(textId,{error:'mock_uncertain'});f.store.markSending(cardId,2000);f.store.markUncertain(cardId,{error:'mock_uncertain'});return{state:'uncertain',text:{state:'uncertain'},card:{state:'uncertain'},withinTwoSeconds:false,withinThreeSeconds:false}},sendText:async()=>{throw new Error('retry_must_not_run')},sendWeComCard:async()=>{throw new Error('retry_must_not_run')}};
+  const o=createOrchestrator({...f.orchestrator.deps,sender,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
+  try{const original=f.orchestrator.deps.sender;const pair=sender.sendTextAndCard;sender.sendTextAndCard=async(...args)=>{const result=await pair(...args);allowed=false;return result};const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});assert.equal(result.state,'needs_human');assert.equal(f.store.listIntents(result.turn.turnId).length,2);assert.equal(f.store.listIntents(result.turn.turnId).filter(i=>i.state==='prepared').length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});

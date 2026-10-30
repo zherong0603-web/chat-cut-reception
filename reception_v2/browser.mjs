@@ -50,7 +50,7 @@ export async function prepareWeComCardPanel(root, cardConfig = DEFAULT_CARD) {
   await root.locator('.chat-tool-wrap .card-box__content-title[title="' + cardConfig.title + '"]').filter({ visible: true }).waitFor({ state: 'visible', timeout: 2000 });
 }
 
-export async function sendConfiguredWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {} }) {
+export async function sendConfiguredWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true }) {
   await assertActive(scope);
   const root = activeConversationRootLocator(page, scope);
   if (await root.count() !== 1) throw new Error('exact_active_conversation_root_required');
@@ -62,7 +62,17 @@ export async function sendConfiguredWeComCard({ page, scope, cardConfig = DEFAUL
   await cardElement.hover({ timeout: 1000 });
   const button = cardElement.getByRole('button', { name: '发送', exact: true });
   if (await button.count() !== 1 || !(await button.isEnabled())) throw new Error('unique_enabled_card_send_required');
+  if(canSend()!==true)throw new Error('outside_reply_hours');
   await button.click({ timeout: 1000 }); await assertActive(scope);
+}
+
+export async function clickConfiguredTextSend({ page, scope, assertActive = async () => {}, canSend = () => true }) {
+  await assertActive(scope);const root=activeConversationRootLocator(page,scope);
+  if(await root.count()!==1)throw new Error('exact_active_conversation_root_required');
+  const button=root.locator('.reply-bottom-bar button').filter({visible:true});
+  if(await button.count()!==1||!(await button.isEnabled()))throw new Error('unique_enabled_send_control_required');
+  if(canSend()!==true)throw new Error('outside_reply_hours');
+  await button.click({timeout:1000});await assertActive(scope);
 }
 
 function deepFindMessages(value) {
@@ -174,7 +184,7 @@ export async function openInteractiveLogin({ profileDir, accountName, timeoutMs 
   }
 }
 
-export async function openBrowser({ profileDir, headless = true, accountId, accountName, card: cardConfig = DEFAULT_CARD }) {
+export async function openBrowser({ profileDir, headless = true, accountId, accountName, card: cardConfig = DEFAULT_CARD, replySchedule = null }) {
   const chromium = await loadChromium();
   fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(profileDir, 0o700);
@@ -201,6 +211,7 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
   await waitForInbox(page, accountName);
 
   let pendingText = null;
+  const canSend=()=>!replySchedule||replySchedule.isAllowed()===true;
   async function assertActive(scope) {
     const value = await browser.mode(scope);
     if (value.pageVisible === false) throw new Error('page_not_visible');
@@ -269,12 +280,8 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
       if (await input.count() !== 1) throw new Error('unique_message_input_required');
       if (await input.inputValue() !== '') throw new Error('existing_operator_draft_preserved');
       await input.fill(text, { timeout: 1000 }); pendingText = text; await assertActive(scope); },
-    async clickTextSend(scope) { await assertActive(scope); const root = activeConversationRootLocator(page, scope);
-      if (await root.count() !== 1) throw new Error('exact_active_conversation_root_required');
-      const button = root.locator('.reply-bottom-bar button').filter({ visible: true });
-      if (await button.count() !== 1 || !(await button.isEnabled())) throw new Error('unique_enabled_send_control_required');
-      await button.click({ timeout: 1000 }); await assertActive(scope); },
-    async sendCard(scope) { return sendConfiguredWeComCard({ page, scope, cardConfig, assertActive }); },
+    async clickTextSend(scope) { return clickConfiguredTextSend({page,scope,assertActive,canSend}); },
+    async sendCard(scope) { return sendConfiguredWeComCard({ page, scope, cardConfig, assertActive, canSend }); },
     async waitForReceipt(intent, { startedAtMs = 0, timeoutMs = 2000 } = {}) { const deadline = Date.now() + timeoutMs;
       while (Date.now() <= deadline) {
         const candidates = nativeRecords.filter(record => record.requestStartedAtMs >= startedAtMs && record.responseOk === true &&
