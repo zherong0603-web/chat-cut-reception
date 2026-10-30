@@ -9,6 +9,7 @@ import { importLegacyUnknowns } from './legacy-blocklist.mjs';
 import { createSender } from './sender.mjs';
 import { createOrchestrator } from './orchestrator.mjs';
 import { composeReply, validateFacts } from './responder.mjs';
+import { createReplySchedule } from './reply-schedule.mjs';
 import { readSidebar } from './sidebar.mjs';
 import { readConversation } from './scope.mjs';
 import { readContacts, revealMaskedContacts } from './contact.mjs';
@@ -46,6 +47,7 @@ async function stopNotifier() {
 }
 
 const account=loadAccountConfig({cwd:process.cwd(),env:process.env});
+const replySchedule=createReplySchedule();
 const runtime=account.runtimeDir,ACCOUNT_ID=account.accountId,ACCOUNT_NAME=account.accountName;
 const args=process.argv.slice(2),command=args[0]||'status';
 function valueAfter(flag,fallback=null){const index=args.indexOf(flag);return index>=0&&args[index+1]?args[index+1]:fallback;}
@@ -90,8 +92,8 @@ if(command==='login'){
     try {
       const approvedFacts=facts();
       notifierPid=startNotifier();
-      const sender=createSender({store,browser:new Proxy({}, {get(_t,key){return (...args)=>browser[key](...args);}}),card:account.card});
-      deps.orchestrator=createOrchestrator({...deps,store,sender,facts:approvedFacts,accountId:ACCOUNT_ID,card:account.card,composeReply,
+      const sender=createSender({store,browser:new Proxy({}, {get(_t,key){return (...args)=>browser[key](...args);}}),card:account.card,replySchedule});
+      deps.orchestrator=createOrchestrator({...deps,store,sender,facts:approvedFacts,accountId:ACCOUNT_ID,card:account.card,replySchedule,composeReply,
         selectConversation:async uid=>{await browser.selectConversation({accountId:ACCOUNT_ID,conversationId:uid});return readConversation(browser.page,{accountId:ACCOUNT_ID,accountName:ACCOUNT_NAME},uid);},
         readContacts:async scope=>readContacts(browser.page,scope),revealMaskedContacts:async scope=>revealMaskedContacts(browser.page,scope),notifier,now:Date.now});
     } catch(error) {
@@ -102,7 +104,7 @@ if(command==='login'){
     }
   }
   deps.afterTick=()=>notifier.flushAcknowledgements();
-  const pilotOne=args.includes('--pilot-one');const daemon=createRuntime({runtimeDir:runtime,accountId:ACCOUNT_ID,armed,pilotOne,deps,initialRelease:lockRelease});
+  const pilotOne=args.includes('--pilot-one');const daemon=createRuntime({runtimeDir:runtime,accountId:ACCOUNT_ID,armed,pilotOne,deps:{...deps,replySchedule},initialRelease:lockRelease});
   const shutdown=async()=>{lifecycle.stopping=true;await daemon.stop();await stopNotifier();process.exit(0);};process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);
   try{await daemon.start();}catch(error){await stopNotifier();throw error;}
   if(pilotOne)await stopNotifier();

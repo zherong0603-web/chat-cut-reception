@@ -21,10 +21,13 @@ function isPlatformBlock(error) {
   return error?.code === 'platform_blocked' || /platform_blocked|发送受限|无法发送/.test(String(error?.message || ''));
 }
 
-export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.now }) {
+export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.now, replySchedule = null }) {
   if (!store || !browser) throw new TypeError('store_and_browser_required');
 
+  function assertReplyWindow(){if(replySchedule&&replySchedule.isAllowed()!==true){const error=new Error('outside_reply_hours');error.code='outside_reply_hours';throw error;}}
+
   async function enterHumanMode(scope) {
+    assertReplyWindow();
     const before = await browser.mode(scope);
     if (before.pageVisible === false) throw new Error('page_not_visible');
     if (!before.scopeReady) throw new Error('scope_not_ready');
@@ -83,6 +86,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
   }
 
   async function sendText(intentId, scope, sourcePlatformTimeMs) {
+    assertReplyWindow();
     const intent = store.getIntent(intentId);
     if (!['text', 'contact_fallback'].includes(intent.kind) || intent.state !== OutboxState.PREPARED) throw new Error('intent_not_prepared');
     const mode = await browser.mode(scope);
@@ -112,6 +116,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
   }
 
   async function sendWeComCard(intentId, scope, sourcePlatformTimeMs) {
+    assertReplyWindow();
     const intent = store.getIntent(intentId);
     if (intent.kind !== 'card' || intent.state !== OutboxState.PREPARED) throw new Error('intent_not_prepared');
     const mode = await browser.mode(scope);
@@ -133,6 +138,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
 
 
   async function sendTextAndCard(textIntentId, cardIntentId, scope, sourcePlatformTimeMs) {
+    assertReplyWindow();
     const textIntent = store.getIntent(textIntentId), cardIntent = store.getIntent(cardIntentId);
     if (textIntent.kind !== 'text' || textIntent.state !== OutboxState.PREPARED ||
         cardIntent.kind !== 'card' || cardIntent.state !== OutboxState.PREPARED) throw new Error('intent_not_prepared');

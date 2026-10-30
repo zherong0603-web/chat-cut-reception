@@ -140,3 +140,27 @@ test('approved regions control every reply without hard-coded extras',()=>{
   const open=composeReply({customerText:'你好',facts:empty,conversationId:'empty'});
   assert.doesNotMatch(open.text,/美国|墨西哥/);assert.match(open.text,/服务/);
 });
+
+test('peer and resource cooperation is stopped without a WeCom card',()=>{
+  const text='你好！方便加个微信交流一下吗，我是做美线尾程提拆派服务，后期有资源可以合作一下❤️';
+  const intent=classifyIntent({customerText:text,facts,nickname:'chenyuanqing全美提柜卡派'});
+  assert.equal(intent.kind,'peer_cooperation');
+  const reply=composeReply({customerText:text,facts,nickname:'chenyuanqing全美提柜卡派',conversationId:'peer'});
+  assert.equal(reply.nextState,'stopped');assert.equal(reply.offerCard,false);assert.match(reply.text,/同行|渠道|资源合作/);assert.doesNotMatch(reply.text,/加我企微|客服小姐姐会/);
+});
+
+test('named unsupported businesses are rejected before price or service intent',()=>{
+  for(const text of ['你们接找货盘吗','个人转运可以做吗','个人快递寄中国','我要自发货','移仓换标能做吗','其他仓退货怎么处理','自发货退件接不接','想和你们合作一下']){
+    const intent=classifyIntent({customerText:text,facts});
+    assert.ok(['unsupported_business','peer_cooperation'].includes(intent.kind),text);
+    const reply=composeReply({customerText:text,facts,conversationId:'blocked-'+text});
+    assert.equal(reply.nextState,'stopped');assert.equal(reply.offerCard,false);assert.doesNotMatch(reply.text,/加我企微|客服小姐姐会/);
+  }
+});
+
+test('genuine logistics demand is not blocked by peer-service words',()=>{
+  const text='我有美国尾程派送货，需要一件代发报价';
+  assert.equal(classifyIntent({customerText:text,facts,nickname:'美国卖家'}).kind,'price');
+  const reply=composeReply({customerText:text,facts,nickname:'美国卖家',conversationId:'real-buyer'});
+  assert.equal(reply.offerCard,true);assert.equal(reply.nextState,'waiting_contact');
+});

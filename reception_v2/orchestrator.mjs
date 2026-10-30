@@ -1,5 +1,7 @@
 import { DEFAULT_CARD } from './account-config.mjs';
 import { ConversationState } from './domain.mjs';
+import { sidebarTimeInReplyWindow } from './reply-schedule.mjs';
+import { classifyIntent, isPeerProfile } from './responder.mjs';
 
 function activeInboundMessages(scope) {
   return (scope.messages || []).filter(message => message.isCustomerText === true || message.isEntryHint === true)
@@ -58,20 +60,24 @@ export function createOrchestrator(deps) {
   const card = deps.card || DEFAULT_CARD;
   const required = ['store','sender','composeReply','facts','readSidebar','selectConversation','readContacts','revealMaskedContacts','notifier','now','accountId'];
   for (const key of required) if (!deps[key]) throw new TypeError('missing_dependency_' + key);
-  const state = { baselineReady: false, seen: new Map(), replyCheckAt: new Map(), takeoverRetryAt: new Map(), contactFailureUntil: new Map(), processing: false, contactCursor: 0, nextContactScanAt: 0 };
+  const state = { baselineReady: false, lastWindowAllowed: null, seen: new Map(), replyCheckAt: new Map(), takeoverRetryAt: new Map(), contactFailureUntil: new Map(), processing: false, contactCursor: 0, nextContactScanAt: 0 };
   const fingerprint=row=>JSON.stringify([row.time??null,row.preview??'',row.statusTags||[],row.statusText||'']);
   const contactReady=row=>clock()>=(state.contactFailureUntil.get(row.uid)||0);
   const deferContact=row=>state.contactFailureUntil.set(row.uid,clock()+300_000);
   const clock=deps.now;
+  const replyWindow=()=>deps.replySchedule?.state?.()||{allowed:true,timezone:'Asia/Shanghai',localDate:null,localTime:null,reason:'unrestricted'};
+  const rowReplyEligible=row=>!deps.replySchedule||sidebarTimeInReplyWindow(row.time);
+  const setBaseline=rows=>{state.seen=new Map((rows||[]).map(row=>[row.uid,fingerprint(row)]));state.replyCheckAt=new Map((rows||[]).filter(row=>row.needsReply===true).map(row=>[row.uid,clock()+1000]));};
   const sleep=deps.sleep||(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
   const stopping=()=>deps.isStopping?.()===true;
-  const isTransientTakeoverError=error=>/native_takeover_control_required|exact_visible_customer_row_required|target_message_dom_not_hydrated|selected_scope_mismatch|scope_not_ready|page_not_visible/.test(String(error?.message||error));
+  const isTransientTakeoverError=error=>/outside_reply_hours|native_takeover_control_required|exact_visible_customer_row_required|target_message_dom_not_hydrated|selected_scope_mismatch|scope_not_ready|page_not_visible/.test(String(error?.message||error));
   const enqueue=async input=>stopping()?null:deps.notifier.enqueue(input);
   const notifyBlocked=async input=>stopping()?null:deps.notifier.notifyBlocked(input);
 
   async function processRow(row, { contactOnly = false } = {}) {
     if (!row || typeof row.uid !== 'string') throw new TypeError('sidebar_row_required');
-    if (state.processing) throw new Error('orchestrator_busy');
+    const window=replyWindow();if(!window.allowed)return {state:'outside_reply_hours',skipped:true,reply_window:window};
+    if(state.processing) throw new Error('orchestrator_busy');
     state.processing = true;
     try {
       const cardClickedToday=/对方已点击你的企业微信联系卡/.test(String(row.preview||''))&&isTodaySidebarTime(row.time,clock());
@@ -80,10 +86,18 @@ export function createOrchestrator(deps) {
       }
       let scope = await deps.selectConversation(row.uid);
       if (!scope || scope.conversationId !== row.uid) throw new Error('selected_scope_mismatch');
+      const currentInbound=activeInboundMessages(scope);
+      const hasCustomerSpeech=currentInbound.some(message=>message.isCustomerText===true);
+      const currentCustomerText=currentInbound.filter(message=>message.isCustomerText===true).map(message=>message.text).filter(Boolean).join('\n');
+      const peerProfile=isPeerProfile(scope.nickname||row.nickname);
+      const preIntent=classifyIntent({customerText:currentCustomerText,facts:deps.facts,history:currentInbound,nickname:scope.nickname||row.nickname});
+      const preExcluded=peerProfile||new Set(['peer_cooperation','unsupported_business','personal_shipping']).has(preIntent.kind);
+      if(peerProfile&&!hasCustomerSpeech)return {state:ConversationState.STOPPED,reason:'peer_profile_silent'};
+      if(contactOnly&&preExcluded)return {state:ConversationState.STOPPED,reason:'excluded_contact_scan_skipped'};
       if (!contactOnly||cardClickedToday) await deps.sender.enterHumanMode(scope);
 
       let cardClickAck=null;
-      if(cardClickedToday){
+      if(cardClickedToday&&!preExcluded){
         const clickTime=parseSidebarTimeToday(row.time,clock())??clock();
         const eventId=`sidebar-card-click:${scope.accountId}:${scope.conversationId}:${row.time||''}:${String(row.preview||'').replace(/\s+/g,'_').slice(0,40)}`;
         const clickTurn=deps.store.ingestInbound({accountId:scope.accountId,conversationId:scope.conversationId,eventId,text:'',type:'CARD_CLICK',platformTimeMs:clickTime,nickname:scope.nickname,evidence:{source:'platform_ui',preview:row.preview}});
@@ -129,7 +143,7 @@ export function createOrchestrator(deps) {
           completed: '已读取当前客户资料', next: '请销售马上联系客户', details: { contacts: verified, candidates, customerText } });
         return { handled: { state: ConversationState.CONTACT_OBTAINED, contacts: verified } };
       };
-      const firstContacts=await observeContacts(scope);if(firstContacts.handled)return {...firstContacts.handled,cardClickAck};
+      const firstContacts=preExcluded?{handled:null,contacts:[]}:await observeContacts(scope);if(firstContacts.handled)return {...firstContacts.handled,cardClickAck};
       if(contactOnly)return { state: 'no_contact' };
 
       const inbound = activeInboundMessages(scope);
@@ -151,7 +165,7 @@ export function createOrchestrator(deps) {
         if (!scope || scope.conversationId !== row.uid) throw new Error('selected_scope_mismatch');
         ingestVisible();
       }
-      const laterContacts=await observeContacts(scope);if(laterContacts.handled)return laterContacts.handled;
+      const laterContacts=preExcluded?{handled:null,contacts:[]}:await observeContacts(scope);if(laterContacts.handled)return laterContacts.handled;
       if (!turn) return { state: 'no_turn' };
       if (turn.state !== ConversationState.CHATTING && turn.attemptCount > 0) return { state: turn.state, skipped: true };
       if (turn.attemptCount >= 3) return { state: turn.state, reason: 'turn_attempt_limit_reached' };
@@ -160,8 +174,8 @@ export function createOrchestrator(deps) {
         .map(message=>message.text).filter(Boolean);
       const nativeCardAlreadySent=(scope.messages||[]).some(message=>message.direction==='right'&&message.type==='CARD'&&String(message.text||'').includes(card.title));
       const priorTexts=[...new Set([...deps.store.listConversationOutboundTexts(scope.accountId,scope.conversationId),...nativeOutboundTexts])];
-      const reply = deps.composeReply({ customerText: turn.inboundTexts.join('\n'), facts: deps.facts, conversationId: scope.conversationId, history: inbound, avoidTexts: priorTexts });
-      if (reply.nextState === ConversationState.STOPPED || !reply.text) {
+      const reply = deps.composeReply({ customerText: turn.inboundTexts.join('\n'), facts: deps.facts, conversationId: scope.conversationId, history: inbound, avoidTexts: priorTexts, nickname: scope.nickname });
+      if (!reply.text) {
         deps.store.setConversationState(scope.accountId, scope.conversationId, ConversationState.STOPPED);
         deps.store.setTurnState(turn.turnId, ConversationState.STOPPED);
         return { state: ConversationState.STOPPED, needsHuman: reply.needsHuman };
@@ -230,7 +244,7 @@ export function createOrchestrator(deps) {
       const sendUncertain = textResult.state === 'uncertain' || cardResult?.state === 'uncertain';
 
       const timingFailed = (textResult.state === 'sent' && textResult.withinThreeSeconds === false) || (cardResult?.state === 'sent' && cardResult.withinThreeSeconds === false);
-      const nextState = reply.needsHuman || sendUncertain || timingFailed ? ConversationState.NEEDS_HUMAN : ConversationState.WAITING_CONTACT;
+      const nextState = reply.needsHuman || sendUncertain || timingFailed ? ConversationState.NEEDS_HUMAN : reply.nextState===ConversationState.STOPPED ? ConversationState.STOPPED : ConversationState.WAITING_CONTACT;
       deps.store.setConversationState(scope.accountId, scope.conversationId, nextState);
       deps.store.setTurnState(turn.turnId, nextState);
       if (timingFailed && !sendUncertain) {
@@ -282,9 +296,9 @@ export function createOrchestrator(deps) {
   }
 
   async function sweepVisibleOverdue({ maxRows = Infinity, contactScan = true, processToday = false } = {}) {
-    const sidebar = await deps.readSidebar({fullScan:true});
+    const sidebar = await deps.readSidebar({fullScan:true});const window=replyWindow();if(!window.allowed){state.baselineReady=true;state.lastWindowAllowed=false;setBaseline(sidebar.rows||[]);return {processed:0,results:[],takeover:{processed:0,failed:[]},failed:[],successfulRead:true,reply_window:window};}state.lastWindowAllowed=true;
     const heldStates=new Set([ConversationState.NEEDS_HUMAN,ConversationState.SEND_BLOCKED,ConversationState.CONTACT_OBTAINED,ConversationState.STOPPED]);
-    const rows = (sidebar.rows || []).filter(row => row.needsReply === true || (processToday&&row.leadSignal!==true&&isTodaySidebarTime(row.time,clock())))
+    const rows = (sidebar.rows || []).filter(row => rowReplyEligible(row) && (row.needsReply === true || (processToday&&row.leadSignal!==true&&isTodaySidebarTime(row.time,clock()))))
       .filter(row => !heldStates.has(deps.store.getConversation(deps.accountId,row.uid)?.state))
       .slice(0, Math.max(0, maxRows));
     const results = [], failuresByUid = new Map(), overdueUids=new Set();
@@ -305,25 +319,27 @@ export function createOrchestrator(deps) {
       try { results.push({ uid: row.uid, ...(await processRow(row)) }); }
       catch (error) { recordFailure(row,error,'row_failed');await notifyFailure(row,error,'row_failed'); }
     }
-    const contactRows=(processToday?(sidebar.rows||[]).filter(row=>isTodaySidebarTime(row.time,clock())):(sidebar.rows||[])).filter(contactReady);
+    const contactRows=(processToday?(sidebar.rows||[]).filter(row=>isTodaySidebarTime(row.time,clock())):(sidebar.rows||[])).filter(row=>rowReplyEligible(row)&&contactReady(row));
     for (const row of contactScan ? contactRows : []) {
       if(overdueUids.has(row.uid))continue;
       try { const result=await processRow(row,{contactOnly:true});state.contactFailureUntil.delete(row.uid);if(result.state===ConversationState.CONTACT_OBTAINED)results.push({uid:row.uid,...result}); }
       catch(error){deferContact(row);recordFailure(row,error,'contact_scan_failed');await notifyFailure(row,error,'contact_scan_failed');}
     }
-    const takeover = await takeoverRows(sidebar.rows || [], { maxRows });
+    const takeover = await takeoverRows((sidebar.rows||[]).filter(rowReplyEligible), { maxRows });
     for (const failure of takeover.failed) recordFailure({ uid: failure.uid }, new Error(failure.error), 'human_takeover_failed');
     state.baselineReady = true;
-    state.seen = new Map((sidebar.rows || []).map(row => [row.uid, fingerprint(row)]));
-    state.replyCheckAt = new Map((sidebar.rows || []).filter(row=>row.needsReply===true).map(row=>[row.uid,clock()+1000]));
-    return { processed: results.length, results, takeover, failed:[...failuresByUid.values()], successfulRead: true };
+    setBaseline(sidebar.rows||[]);
+    return { processed: results.length, results, takeover, failed:[...failuresByUid.values()], successfulRead: true, reply_window:window };
   }
 
   async function pollOnce() {
-    const sidebar = await deps.readSidebar();
+    const sidebar = await deps.readSidebar();const window=replyWindow();
+    if(!window.allowed){state.baselineReady=true;state.lastWindowAllowed=false;setBaseline(sidebar.rows||[]);return {processed:0,failed:[],successfulRead:true,reply_window:window};}
+    if(state.lastWindowAllowed===false){state.lastWindowAllowed=true;setBaseline(sidebar.rows||[]);return {processed:0,failed:[],successfulRead:true,reply_window:window};}
     if (!state.baselineReady) return sweepVisibleOverdue();
     const failed=[];
     const candidates=(sidebar.rows||[]).filter(row=>{
+      if(!rowReplyEligible(row))return false;
       if(state.takeoverRetryAt.has(row.uid))return false;
       const serialized=fingerprint(row);
       if(!state.seen.has(row.uid) || state.seen.get(row.uid)!==serialized)return true;
@@ -338,7 +354,7 @@ export function createOrchestrator(deps) {
         state.seen.set(row.uid,fingerprint(row));
         if(row.needsReply===true)state.replyCheckAt.set(row.uid,clock()+1000);
         if (result.skipped) continue;
-        return { processed: 1, result: { uid: row.uid, ...result }, failed, successfulRead: true };
+        return { processed: 1, result: { uid: row.uid, ...result }, failed, successfulRead: true, reply_window:window };
       } catch (error) {
         if(isTransientTakeoverError(error)){
           state.seen.set(row.uid,fingerprint(row));state.takeoverRetryAt.set(row.uid,clock()+1000);continue;
@@ -350,11 +366,11 @@ export function createOrchestrator(deps) {
     if(takeoverRowsDue.length){
       const takeover=await takeoverRows(takeoverRowsDue,{maxRows:5,requireMarked:false});
       for(const failure of takeover.failed)failed.push({uid:failure.uid,error:failure.error});
-      if(takeover.processed)return{processed:takeover.processed,takeover,failed,successfulRead:true};
+      if(takeover.processed)return{processed:takeover.processed,takeover,failed,successfulRead:true,reply_window:window};
     }
     const allRows=(sidebar.rows||[]).filter(row=>isTodaySidebarTime(row.time,clock())&&contactReady(row));
-    if(allRows.length && clock()>=state.nextContactScanAt){const row=allRows[state.contactCursor++%allRows.length];state.nextContactScanAt=clock()+1000;try{const result=await processRow(row,{contactOnly:true});state.contactFailureUntil.delete(row.uid);return {processed:result.state===ConversationState.CONTACT_OBTAINED?1:0,contact_scan:result, failed, successfulRead:true};}catch(error){deferContact(row);failed.push({uid:row.uid,error:error?.message||'contact_scan_failed'});try{await enqueue({kind:'needs_operator',accountId:deps.accountId,conversationId:row.uid,customer:row.nickname||'当前客户',need:row.preview||'新消息',contact:'自动接待失败',completed:'本轮没有完成客户操作',next:'请人工查看这个客户',details:{phase:'poll_contact_scan_failed',error:String(error?.message||'contact_scan_failed').slice(0,160)}});}catch{}}}
-    return { processed: 0, failed, successfulRead: true };
+    if(allRows.length && clock()>=state.nextContactScanAt){const row=allRows[state.contactCursor++%allRows.length];state.nextContactScanAt=clock()+1000;try{const result=await processRow(row,{contactOnly:true});state.contactFailureUntil.delete(row.uid);return {processed:result.state===ConversationState.CONTACT_OBTAINED?1:0,contact_scan:result, failed, successfulRead:true,reply_window:window};}catch(error){deferContact(row);failed.push({uid:row.uid,error:error?.message||'contact_scan_failed'});try{await enqueue({kind:'needs_operator',accountId:deps.accountId,conversationId:row.uid,customer:row.nickname||'当前客户',need:row.preview||'新消息',contact:'自动接待失败',completed:'本轮没有完成客户操作',next:'请人工查看这个客户',details:{phase:'poll_contact_scan_failed',error:String(error?.message||'contact_scan_failed').slice(0,160)}});}catch{}}}
+    return { processed: 0, failed, successfulRead: true, reply_window:window };
   }
 
   return { processRow, pollOnce, sweepVisibleOverdue, takeoverVisiblePlatformAi, deps };

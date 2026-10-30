@@ -21,7 +21,7 @@ function fixture(overrides={}) {
     waitForReceipt:async(intent)=>({serverStatus:'confirmed',accountId,conversationId,content:intent.content,type:intent.kind==='card'?'CARD':'TEXT',cardTitle:intent.kind==='card'?'企微_运去哪海外仓（企微）':null,platformTimeMs:2100,observedAtMs:2200,visibleAtMs:2200,
       senderId:accountId,receiverId:conversationId,direction:'OUTBOUND',nativeId:`id_${accountId}.${conversationId}.${intent.kind}`,...(overrides.receipt||{})}),
     state:{manual:false,activeConversation:conversationId},calls};
-  const sender=createSender({store,browser,now:()=>2000});
+  const sender=createSender({store,browser,now:()=>2000,...(overrides.senderOptions||{})});
   return {dir,store,turn,scope,browser,sender};
 }
 
@@ -111,4 +111,11 @@ test('three-second target uses platform post time rather than slow confirmation 
   const f=fixture({receipt:{platformTimeMs:3500,observedAtMs:9000,visibleAtMs:null}});f.browser.state.manual=true;
   const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
   try{const result=await f.sender.sendText(intent.intentId,f.scope,1000);assert.equal(result.state,'sent');assert.equal(result.postedMs,2500);assert.equal(result.confirmedMs,8000);assert.equal(result.withinTwoSeconds,false);assert.equal(result.withinThreeSeconds,true);assert.equal(f.store.getIntent(intent.intentId).payload.withinThreeSeconds,true);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+
+test('sender hard-stops before any browser action outside reply hours',async()=>{
+  const f=fixture({senderOptions:{replySchedule:{isAllowed:()=>false,state:()=>({allowed:false,reason:'closed'})}}});
+  const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
+  try{await assert.rejects(()=>f.sender.sendText(intent.intentId,f.scope,1000),/outside_reply_hours/);assert.equal(f.store.getIntent(intent.intentId).state,'prepared');assert.equal(f.browser.calls.length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });

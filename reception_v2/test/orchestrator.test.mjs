@@ -148,3 +148,52 @@ test('a failed background contact scan backs off instead of blocking every poll'
   let selections=0;const o=createOrchestrator({...f.orchestrator.deps,selectConversation:async()=>{selections++;throw new Error('exact_visible_customer_row_required')},now:()=>now});
   try{await o.pollOnce();assert.equal(selections,1);now+=2000;await o.pollOnce();assert.equal(selections,1);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
+
+test('outside reply hours reads health but creates no intent or conversation interaction',async()=>{
+  const now=new Date(2026,9,28,18,30,0).getTime();const f=fixture();let selections=0;
+  const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:{isAllowed:()=>false,state:()=>({allowed:false,reason:'closed'})},selectConversation:async uid=>{selections++;return f.scopeFor(uid)}});
+  try{const result=await o.pollOnce();assert.equal(result.processed,0);assert.equal(result.reply_window.reason,'closed');assert.equal(selections,0);assert.equal(f.store.listTurns(accountId,u1).length,0);assert.equal(f.state.calls.length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('opening the reply window does not backfill off-hours rows',async()=>{
+  let allowed=false;const rows=[{uid:u1,nickname:'甲',needsReply:true,preview:'旧消息',time:'18:59:00'}];
+  const f=fixture({rows});const o=createOrchestrator({...f.orchestrator.deps,readSidebar:async()=>({rows}),replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
+  try{await o.pollOnce();allowed=true;const opened=await o.pollOnce();assert.equal(opened.processed,0);assert.equal(f.store.listTurns(accountId,u1).length,0);rows[0]={...rows[0],preview:'新消息',time:'19:01:00'};const fresh=await o.pollOnce();assert.equal(fresh.processed,1);assert.equal(f.store.listTurns(accountId,u1).length,1);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('startup during reply hours ignores sidebar rows timestamped before 19:00',async()=>{
+  const now=new Date(2026,9,28,20,0,0).getTime();const f=fixture({rows:[{uid:u1,nickname:'甲',needsReply:true,preview:'旧消息',time:'18:59:59'}]});let selections=0;
+  const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:{isAllowed:()=>true,state:()=>({allowed:true,reason:'open'})},selectConversation:async uid=>{selections++;return f.scopeFor(uid)}});
+  try{const result=await o.pollOnce();assert.equal(result.processed,0);assert.equal(selections,0);assert.equal(f.store.listTurns(accountId,u1).length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('silent peer-profile visitor receives no welcome, takeover, card, or contact scan',async()=>{
+  const f=fixture();const scope={accountId,conversationId:u1,nickname:'chenyuanqing全美提柜卡派',profileFields:[],messages:[{nativeId:'hint',direction:'center',type:'RICH_HINT',text:'对方通过笔记进入私信',platformTimeMs:1000,isEntryHint:true,isCustomerText:false}]};
+  const o=createOrchestrator({...f.orchestrator.deps,selectConversation:async()=>scope});
+  try{const result=await o.processRow({uid:u1,nickname:scope.nickname,needsReply:false});assert.equal(result.state,'stopped');assert.equal(result.reason,'peer_profile_silent');assert.equal(f.state.calls.length,0);assert.equal(f.state.cards.filter(card=>card.kind==='ready_to_follow').length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('peer cooperation gets one refusal and never creates a contact lead or card',async()=>{
+  const f=fixture();const text='你好！方便加个微信交流一下吗，我是做美线尾程提拆派服务，后期有资源可以合作一下';
+  const scope={accountId,conversationId:u1,nickname:'chenyuanqing全美提柜卡派',profileFields:[],messages:[{nativeId:'m-peer',direction:'left',type:'TEXT',text,platformTimeMs:1000,isCustomerText:true}]};
+  const o=createOrchestrator({...f.orchestrator.deps,selectConversation:async()=>scope,readContacts:async()=>[{accountId,conversationId:u1,kind:'phone',value:'17300006725',source:'profile',verified:true}]});
+  try{const result=await o.processRow({uid:u1,nickname:scope.nickname,needsReply:true});assert.equal(result.state,'stopped');assert.equal(f.state.calls.filter(x=>x==='card-send').length,0);assert.equal(f.state.cards.filter(card=>card.kind==='ready_to_follow').length,0);assert.match(f.state.calls.find(x=>x.startsWith('fill:')),/同行|合作/);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('unsupported business gets one refusal without contact lead or card',async()=>{
+  const f=fixture();const text='移仓换标你们能做吗';const scope={accountId,conversationId:u1,nickname:'卖家',profileFields:[],messages:[{nativeId:'m-blocked',direction:'left',type:'TEXT',text,platformTimeMs:1000,isCustomerText:true}]};
+  const o=createOrchestrator({...f.orchestrator.deps,selectConversation:async()=>scope,readContacts:async()=>[{accountId,conversationId:u1,kind:'phone',value:'17300006725',source:'profile',verified:true}]});
+  try{const result=await o.processRow({uid:u1,nickname:'卖家',needsReply:true});assert.equal(result.state,'stopped');assert.equal(f.state.calls.filter(x=>x==='card-send').length,0);assert.equal(f.state.cards.filter(card=>card.kind==='ready_to_follow').length,0);assert.match(f.state.calls.find(x=>x.startsWith('fill:')),/不接/);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('obvious peer profile cannot obtain a normal greeting or WeCom card',async()=>{
+  const f=fixture();const scope={accountId,conversationId:u1,nickname:'全美提柜卡派服务商',profileFields:[],messages:[{nativeId:'m-peer-hi',direction:'left',type:'TEXT',text:'你好',platformTimeMs:1000,isCustomerText:true}]};
+  const o=createOrchestrator({...f.orchestrator.deps,selectConversation:async()=>scope});
+  try{const result=await o.processRow({uid:u1,nickname:scope.nickname,needsReply:true});assert.equal(result.state,'stopped');assert.equal(f.state.calls.filter(x=>x==='card-send').length,0);assert.match(f.state.calls.find(x=>x.startsWith('fill:')),/同行|合作/);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a message change between closed polling and 19:00 is not backfilled',async()=>{
+  let allowed=false;const rows=[{uid:u1,nickname:'甲',needsReply:true,preview:'18:30之前',time:'18:30:00'}];
+  const f=fixture({rows});const o=createOrchestrator({...f.orchestrator.deps,readSidebar:async()=>({rows}),replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
+  try{await o.pollOnce();rows[0]={...rows[0],preview:'18:59新消息',time:'18:59:00'};allowed=true;const opening=await o.pollOnce();assert.equal(opening.processed,0);const next=await o.pollOnce();assert.equal(next.processed,0);assert.equal(f.store.listTurns(accountId,u1).length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});

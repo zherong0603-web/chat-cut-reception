@@ -58,11 +58,11 @@ export function createRuntime({runtimeDir,accountId,armed=false,pilotOne=false,d
   if(pilotOne&&!armed)throw new Error('pilot_requires_armed_runtime');
   let release=initialRelease,browser=null,timer=null,startedAt=null,lastError=null,currentTick=null,lastSweep=null;
   const healthPath=path.join(runtimeDir,HEALTH);
-  function writeHealth({successfulRead=false,candidates=null,activeUid=null,sendState='idle',error=null}={}){
+  function writeHealth({successfulRead=false,candidates=null,activeUid=null,sendState='idle',error=null,replyWindow=null}={}){
     const previous=readHealth(runtimeDir);const now=new Date().toISOString();
     const record={version:1,account_id:accountId,armed,running:Boolean(release),started_at_utc:startedAt,
       last_tick_at_utc:now,last_successful_sidebar_read_at:successfulRead?now:(previous?.last_successful_sidebar_read_at||null),
-      candidates,active_uid:activeUid,send_state:sendState,error:error?String(error).replace(/[^A-Za-z0-9_:-]/g,'_').slice(0,120):null,recorded_at_utc:now};
+      candidates,active_uid:activeUid,send_state:sendState,reply_window:replyWindow||deps.replySchedule?.state?.()||null,error:error?String(error).replace(/[^A-Za-z0-9_:-]/g,'_').slice(0,120):null,recorded_at_utc:now};
     atomicJson(healthPath,record);return record;
   }
   async function poll(){return armed&&deps.orchestrator?deps.orchestrator.pollOnce():deps.readSidebar();}
@@ -74,8 +74,8 @@ export function createRuntime({runtimeDir,accountId,armed=false,pilotOne=false,d
       if(browser?.isTransportHealthy?.()===false)await recoverBrowser();else await ensureBrowser();let result;
       try{result=await poll();}
       catch(error){if(isNavigationRecoveryError(error)&&typeof deps.recoverBrowserNavigation==='function'){await deps.recoverBrowserNavigation();result=await poll();}else if(isFatalBrowserError(error)){await recoverBrowser();result=await poll();}else throw error;}
-      if(armed&&deps.orchestrator){lastError=result?.failed?.length?result.failed[0].error:null;const health=writeHealth({successfulRead:result?.successfulRead===true,candidates:result?.processed??null,activeUid:result?.result?.uid||null,sendState:result?.failed?.length?'row_failed':'idle',error:lastError});await deps.afterTick?.();return health;}
-      lastError=null;return writeHealth({successfulRead:true,candidates:result.rows?.length??0,sendState:'read_only'});
+      if(armed&&deps.orchestrator){lastError=result?.failed?.length?result.failed[0].error:null;const health=writeHealth({successfulRead:result?.successfulRead===true,candidates:result?.processed??null,activeUid:result?.result?.uid||null,sendState:result?.reply_window?.allowed===false?'outside_hours':result?.failed?.length?'row_failed':'idle',error:lastError,replyWindow:result?.reply_window||null});await deps.afterTick?.();return health;}
+      lastError=null;return writeHealth({successfulRead:true,candidates:result.rows?.length??0,sendState:'read_only',replyWindow:result?.reply_window||null});
     }catch(error){lastError=error.message;return writeHealth({sendState:isFatalBrowserError(error)?'browser_recovery_failed':'idle',error:error.message});}
   }
   function tick(){if(currentTick)return currentTick;currentTick=runTick().finally(()=>{currentTick=null;});return currentTick;}
@@ -83,7 +83,7 @@ export function createRuntime({runtimeDir,accountId,armed=false,pilotOne=false,d
     if(browser)return status();
     if(!release)release=acquireRuntimeLock(runtimeDir);startedAt=new Date().toISOString();
     try{
-      browser=await deps.launchBrowser();if(!armed){try{const sidebar=await deps.readSidebar();writeHealth({successfulRead:true,candidates:sidebar.rows?.length??0,sendState:'read_only'});}catch(error){lastError=error.message;writeHealth({error:error.message,sendState:'read_only'});}}else if(deps.orchestrator){lastSweep=await deps.orchestrator.sweepVisibleOverdue(pilotOne?{maxRows:1,contactScan:false,processToday:true}:{processToday:true});writeHealth({successfulRead:lastSweep?.successfulRead===true,candidates:lastSweep?.processed??0,activeUid:lastSweep?.results?.[0]?.uid||null,sendState:'armed',error:lastSweep?.failed?.[0]?.error||null});if(pilotOne){await stop();return status();}}
+      browser=await deps.launchBrowser();if(!armed){try{const sidebar=await deps.readSidebar();writeHealth({successfulRead:true,candidates:sidebar.rows?.length??0,sendState:'read_only'});}catch(error){lastError=error.message;writeHealth({error:error.message,sendState:'read_only'});}}else if(deps.orchestrator){lastSweep=await deps.orchestrator.sweepVisibleOverdue(pilotOne?{maxRows:1,contactScan:false,processToday:true}:{processToday:true});writeHealth({successfulRead:lastSweep?.successfulRead===true,candidates:lastSweep?.processed??0,activeUid:lastSweep?.results?.[0]?.uid||null,sendState:lastSweep?.reply_window?.allowed===false?'outside_hours':'armed',error:lastSweep?.failed?.[0]?.error||null,replyWindow:lastSweep?.reply_window||null});if(pilotOne){await stop();return status();}}
       timer=setInterval(()=>{void tick().catch(()=>{});},POLL_INTERVAL_MS);timer.unref?.();return status();
     }catch(error){lastError=error.message;await deps.closeBrowser?.();release?.();release=null;writeHealth({error:error.message});throw error;}
   }
