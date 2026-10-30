@@ -11,7 +11,7 @@ const account = { id: configured.accountId, name: configured.accountName };
 const runtime = configured.runtimeDir;
 const browser = await openBrowser({
   profileDir: path.join(runtime, 'isolated-browser-profile'),
-  headless: false,
+  headless: true,
   accountId: account.id,
   accountName: account.name,
   card: configured.card,
