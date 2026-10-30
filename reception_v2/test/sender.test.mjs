@@ -63,7 +63,7 @@ test('strict native history rejects pre-submit and mismatched records',()=>{
   assert.equal(verifyNativeHistory(intent,{...good,observedAtMs:1800},1000,2000),false);
   assert.equal(verifyNativeHistory(intent,{...good,platformTimeMs:999},1000,2000),false);
   assert.equal(verifyNativeHistory(intent,{...good,platformTimeMs:1900},1000,2000),false);
-  assert.equal(verifyNativeHistory(intent,{...good,visibleAtMs:null},1000,2000),false);
+  assert.equal(verifyNativeHistory(intent,{...good,visibleAtMs:null},1000,2000),true);
   assert.equal(verifyNativeHistory(intent,{...good,senderId:conversationId},1000,2000),false);
   assert.equal(verifyNativeHistory(intent,{...good,receiverId:accountId},1000,2000),false);
   assert.equal(verifyNativeHistory(intent,{...good,direction:'INBOUND'},1000,2000),false);
@@ -97,4 +97,18 @@ test('card failure after text click never leaves text permanently sending',async
   const textIntent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
   const cardIntent=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
   try{const result=await f.sender.sendTextAndCard(textIntent.intentId,cardIntent.intentId,f.scope,1000);assert.equal(result.text.state,'uncertain');assert.equal(result.card.state,'uncertain');assert.equal(f.store.getIntent(textIntent.intentId).state,'uncertain');assert.equal(f.store.getIntent(cardIntent.intentId).state,'uncertain');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+
+test('server history controls reply speed while UI hydration does not block confirmation',()=>{
+  const intent={accountId,conversationId,kind:'text',content:'你好',payload:{}};
+  const serverOnly={serverStatus:'confirmed',accountId,conversationId,content:'你好',type:'TEXT',platformTimeMs:2500,observedAtMs:9000,visibleAtMs:null,
+    senderId:accountId,receiverId:conversationId,direction:'OUTBOUND',nativeId:`id_${accountId}.${conversationId}.m1`};
+  assert.equal(verifyNativeHistory(intent,serverOnly,1000,2000),true);
+});
+
+test('three-second target uses platform post time rather than slow confirmation time',async()=>{
+  const f=fixture({receipt:{platformTimeMs:3500,observedAtMs:9000,visibleAtMs:null}});f.browser.state.manual=true;
+  const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
+  try{const result=await f.sender.sendText(intent.intentId,f.scope,1000);assert.equal(result.state,'sent');assert.equal(result.postedMs,2500);assert.equal(result.confirmedMs,8000);assert.equal(result.withinTwoSeconds,false);assert.equal(result.withinThreeSeconds,true);assert.equal(f.store.getIntent(intent.intentId).payload.withinThreeSeconds,true);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });

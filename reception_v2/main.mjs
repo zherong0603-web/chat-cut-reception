@@ -83,7 +83,7 @@ if(command==='login'){
   const notifier=createNotifierStore(runtime);const lifecycle={stopping:false};let browser=null;
   const closeBrowserTransport=async()=>{if(browser){const current=browser;browser=null;await current.close();}};
   const deps={launchBrowser:async()=>{browser=await openBrowser({profileDir,headless:true,accountId:ACCOUNT_ID,accountName:ACCOUNT_NAME,card:account.card});return browser;},
-    closeBrowser:async()=>{await closeBrowserTransport();store.close();},closeBrowserTransport,
+    closeBrowser:async()=>{await closeBrowserTransport();store.close();},closeBrowserTransport,recoverBrowserNavigation:async()=>browser?.recoverNavigation?.(),
     readSidebar:async options=>readSidebar(browser.page,{id:ACCOUNT_ID,name:ACCOUNT_NAME},options),isStopping:()=>lifecycle.stopping,orchestrator:null};
   let notifierPid=null;
   if(armed){

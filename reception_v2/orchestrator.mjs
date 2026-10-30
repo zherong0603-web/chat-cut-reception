@@ -176,7 +176,7 @@ export function createOrchestrator(deps) {
           completed: '为避免重复回复，本次没有再次发送', next: '请人工回复客户的新问题' });
         return { state: ConversationState.NEEDS_HUMAN, reason: 'duplicate_generated_reply_prevented', turn, reply };
       }
-      let textResult, cardIntent = null, cardResult = null, bothWithinTwoSeconds = null;
+      let textResult, cardIntent = null, cardResult = null, bothWithinTwoSeconds = null, bothWithinThreeSeconds = null;
       if (reply.offerCard && !nativeCardAlreadySent) {
         try {
           cardIntent = deps.store.createIntent({ turnId: turn.turnId, kind: 'card', payload: { cardTitle: card.title } });
@@ -187,7 +187,7 @@ export function createOrchestrator(deps) {
           const pair = await deps.sender.sendTextAndCard(textIntent.intentId, cardIntent.intentId, scope, turn.openedAtMs);
           textResult = pair.text || { state: pair.state };
           cardResult = pair.card || { state: pair.state };
-          bothWithinTwoSeconds = pair.withinTwoSeconds;
+          bothWithinTwoSeconds = pair.withinTwoSeconds; bothWithinThreeSeconds = pair.withinThreeSeconds;
         } else {
           textResult = await deps.sender.sendText(textIntent.intentId, scope, turn.openedAtMs);
           cardResult = { state: 'already_sent_or_blocked', duplicate: true };
@@ -214,6 +214,7 @@ export function createOrchestrator(deps) {
         }
       }
       bothWithinTwoSeconds=cardResult&&!cardResult.duplicate?textResult.withinTwoSeconds===true&&cardResult.withinTwoSeconds===true:null;
+      bothWithinThreeSeconds=cardResult&&!cardResult.duplicate?textResult.withinThreeSeconds===true&&cardResult.withinThreeSeconds===true:null;
       if (textResult.state === 'send_blocked' || cardResult?.state === 'send_blocked') {
         deps.store.setConversationState(scope.accountId, scope.conversationId, ConversationState.SEND_BLOCKED);
         deps.store.setTurnState(turn.turnId, ConversationState.SEND_BLOCKED);
@@ -226,14 +227,14 @@ export function createOrchestrator(deps) {
 
       const sendUncertain = textResult.state === 'uncertain' || cardResult?.state === 'uncertain';
 
-      const timingFailed = (textResult.state === 'sent' && textResult.withinTwoSeconds === false) || (cardResult?.state === 'sent' && cardResult.withinTwoSeconds === false);
+      const timingFailed = (textResult.state === 'sent' && textResult.withinThreeSeconds === false) || (cardResult?.state === 'sent' && cardResult.withinThreeSeconds === false);
       const nextState = reply.needsHuman || sendUncertain || timingFailed ? ConversationState.NEEDS_HUMAN : ConversationState.WAITING_CONTACT;
       deps.store.setConversationState(scope.accountId, scope.conversationId, nextState);
       deps.store.setTurnState(turn.turnId, nextState);
       if (timingFailed && !sendUncertain) {
         await enqueue({ kind: 'needs_operator', accountId: scope.accountId, conversationId: scope.conversationId,
           customer: scope.nickname || row.uid, need: (turn.inboundTexts.at(-1)||'新客户进线'), contact: '暂未取得',
-          completed: '文字和企微卡已发出，但未在2秒内完成确认', next: '请检查客户是否已经看到', details: { customerText: (turn.inboundTexts.at(-1)||'新客户进线'), text: textResult, card: cardResult } });
+          completed: '文字和企微卡已发出，但未在3秒内完成平台落库', next: '请检查客户是否已经看到', details: { customerText: (turn.inboundTexts.at(-1)||'新客户进线'), text: textResult, card: cardResult } });
       } else if (sendUncertain) {
         await notifyBlocked({ kind: 'send_failed', accountId: scope.accountId, conversationId: scope.conversationId,
           customer: scope.nickname || row.uid, need: (turn.inboundTexts.at(-1)||'新客户进线'), contact: '暂未取得',
@@ -243,7 +244,7 @@ export function createOrchestrator(deps) {
           customer: scope.nickname || row.uid, need: (turn.inboundTexts.at(-1)||'新客户进线'), contact: '暂未取得',
           completed: '已人工接管并回复，业务资料不足', next: '请人工确认客户问题', details: { reply: reply.text, customerText: (turn.inboundTexts.at(-1)||'新客户进线') } });
       }
-      return { state: nextState, turn, reply, text: textResult, card: cardResult, fallback: fallbackResult, bothWithinTwoSeconds };
+      return { state: nextState, turn, reply, text: textResult, card: cardResult, fallback: fallbackResult, bothWithinTwoSeconds, bothWithinThreeSeconds };
     } finally { state.processing = false; }
   }
 

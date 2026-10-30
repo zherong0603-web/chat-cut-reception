@@ -76,3 +76,9 @@ test('configured card sender has no config shadowing and clicks the exact native
   await sendConfiguredWeComCard({page,scope,cardConfig,assertActive:async()=>calls.push('active')});
   assert.deepEqual(calls.filter(x=>['active','title-visible','tab','hover','send'].includes(x)),['active','tab','title-visible','active','hover','send','active']);
 });
+
+test('browser launch options use the full Chromium executable instead of old headless shell',async()=>{
+  const {browserLaunchOptions}=await import('../browser.mjs');
+  const chromium={executablePath:()=>'/cache/chromium/Google Chrome for Testing'};
+  assert.deepEqual(browserLaunchOptions({chromium,headless:true,env:{}}),{headless:true,executablePath:'/cache/chromium/Google Chrome for Testing'});
+});

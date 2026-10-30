@@ -101,3 +101,10 @@ test('non-fatal poll failure does not restart a healthy browser',async()=>{
   const r=createRuntime({runtimeDir:dir,accountId:'a',armed:true,deps});
   try{await r.start();await r.tick();assert.equal(launches,1);assert.equal(transportCloses,0);assert.equal(readHealth(dir).error,'sidebar_read_failed');}finally{await r.stop();fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('route drift reopens the inbox without relaunching the whole browser',async()=>{
+  const dir=root();let launches=0,navigationRecoveries=0,polls=0;
+  const deps={launchBrowser:async()=>({instance:++launches}),closeBrowser:async()=>{},closeBrowserTransport:async()=>{},recoverBrowserNavigation:async()=>{navigationRecoveries++;},readSidebar:async()=>({rows:[]}),orchestrator:{sweepVisibleOverdue:async()=>({processed:0,successfulRead:true}),pollOnce:async()=>{polls++;if(polls===1)throw new Error('unexpected_sidebar_route');return{processed:0,failed:[],successfulRead:true};}}};
+  const r=createRuntime({runtimeDir:dir,accountId:'a',armed:true,deps});
+  try{await r.start();await r.tick();const health=readHealth(dir);assert.equal(launches,1);assert.equal(navigationRecoveries,1);assert.equal(polls,2);assert.equal(health.error,null);assert(health.last_successful_sidebar_read_at);}finally{await r.stop();fs.rmSync(dir,{recursive:true,force:true});}
+});

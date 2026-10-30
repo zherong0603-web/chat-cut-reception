@@ -124,6 +124,27 @@ export async function selectVisibleConversation(page, scope, modeFn) {
   throw new Error('exact_visible_customer_row_required');
 }
 
+export function browserLaunchOptions({ chromium, headless, env = process.env }) {
+  const executablePath=String(env.XHS_BROWSER_EXECUTABLE||'').trim() || (typeof chromium?.executablePath==='function'?chromium.executablePath():null);
+  return { headless, ...(executablePath?{executablePath}:{}) };
+}
+
+async function waitForInbox(page, accountName) {
+  await page.goto('https://sxt.xiaohongshu.com/im/multiCustomerService', { waitUntil: 'domcontentloaded', timeout: 20_000 });
+  await page.locator('#walle-ad').first().waitFor({ state: 'attached', timeout: 20_000 });
+  const readyDeadline = Date.now() + 20_000;
+  while (Date.now() < readyDeadline) {
+    if (acceptsAccountTitle(await page.title(), accountName)) break;
+    await page.waitForTimeout(100);
+  }
+  if (!acceptsAccountTitle(await page.title(), accountName)) {
+    const loginControls=await page.locator('input[type="password"],button:has-text("登录"),input[placeholder*="手机号"]').count().catch(()=>0);
+    throw new Error(loginControls>0?'auth_required':'account_title_not_ready');
+  }
+  const rowsDeadline = Date.now() + 10_000;
+  while (Date.now() < rowsDeadline && await page.locator('.sx-contact-item').count() === 0) await page.waitForTimeout(100);
+}
+
 async function loadChromium() {
   const modulePath = process.env.XHS_PLAYWRIGHT_MODULE;
   if (!modulePath) throw new Error('playwright_module_required');
@@ -137,7 +158,7 @@ export async function openInteractiveLogin({ profileDir, accountName, timeoutMs 
   const chromium = await loadChromium();
   fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(profileDir, 0o700);
-  const context = await chromium.launchPersistentContext(profileDir, { headless: false });
+  const context = await chromium.launchPersistentContext(profileDir, browserLaunchOptions({chromium,headless:false}));
   const page = context.pages()[0] || await context.newPage();
   try {
     await page.goto('https://sxt.xiaohongshu.com/im/multiCustomerService', { waitUntil: 'domcontentloaded', timeout: 15_000 });
@@ -157,8 +178,10 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
   const chromium = await loadChromium();
   fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(profileDir, 0o700);
-  const context = await chromium.launchPersistentContext(profileDir, { headless });
+  const context = await chromium.launchPersistentContext(profileDir, browserLaunchOptions({chromium,headless}));
   const page = context.pages()[0] || await context.newPage();
+  const transport={crashed:false,closed:false};
+  page.on('crash',()=>{transport.crashed=true;});page.on('close',()=>{transport.closed=true;});context.on('close',()=>{transport.closed=true;});
   const nativeRecords = [];
   const requestStarts = new WeakMap();
   page.on('request', request => {
@@ -175,17 +198,7 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
       if (nativeRecords.length > 100) nativeRecords.splice(0, nativeRecords.length - 100);
     } catch {}
   });
-  await page.goto('https://sxt.xiaohongshu.com/im/multiCustomerService', { waitUntil: 'domcontentloaded', timeout: 15_000 });
-  await page.locator('#walle-ad').first().waitFor({ state: 'attached', timeout: 15_000 });
-  const readyDeadline = Date.now() + 8_000;
-  while (Date.now() < readyDeadline) {
-    const title = await page.title();
-    if (acceptsAccountTitle(title, accountName)) break;
-    await page.waitForTimeout(100);
-  }
-  if (!acceptsAccountTitle(await page.title(), accountName)) throw new Error('account_title_not_ready');
-  const rowsDeadline = Date.now() + 5_000;
-  while (Date.now() < rowsDeadline && await page.locator('.sx-contact-item').count() === 0) await page.waitForTimeout(100);
+  await waitForInbox(page, accountName);
 
   let pendingText = null;
   async function assertActive(scope) {
@@ -198,6 +211,8 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
 
   const browser = {
     page, context, nativeRecords,
+    isTransportHealthy() { return !transport.crashed && !transport.closed && !page.isClosed(); },
+    async recoverNavigation() { if (!this.isTransportHealthy()) throw new Error('page has been closed'); await waitForInbox(page, accountName); },
     async selectConversation(scope) { return selectVisibleConversation(page, scope, value => this.mode(value)); },
     async refreshConversation(scope) {
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 15_000 });
@@ -264,47 +279,15 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
       while (Date.now() <= deadline) {
         const candidates = nativeRecords.filter(record => record.requestStartedAtMs >= startedAtMs && record.responseOk === true &&
           record.queryUserIds?.length === 1 && record.queryUserIds[0] === intent.conversationId)
-          .flatMap(record => deepFindMessages(record.body)).filter(row => {
-          return nativeMessageMatchesOutboundIntent(row,intent,startedAtMs,cardConfig);
-        });
-        if (intent.kind === 'card') {
-          const match = candidates.find(row => (row.sixin_message.message_type || row.sixin_message.type) === 'CARD');
-          if (match) {
-            const expectedNativeId = 'id_' + String(match.sixin_message.id);
-            const visible = await page.evaluate(({ accountId, conversationId, expected, expectedNativeId, cutoff }) => {
-              const rendered = el => el?.checkVisibility ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : Boolean(el?.getClientRects?.().length);
-              const active = Array.from(document.querySelectorAll('.sx-contact-item.active')).filter(rendered);
-              if (active.length !== 1 || active[0].getAttribute('data-key') !== 'Total-' + conversationId) return null;
-              const roots = Array.from(document.querySelectorAll('.im-msg-item[id^="id_' + accountId + '.' + conversationId + '."],.im-msg-item[id^="id_' + conversationId + '.' + accountId + '."]')).filter(rendered);
-              for (const root of roots) if (root.id === expectedNativeId && String(root.innerText || '').includes(expected) &&
-                Number(root.querySelector('[data-timestamp]')?.getAttribute('data-timestamp')) === cutoff &&
-                String(root.querySelector('[id^="jarvis-msg-"]')?.getAttribute('class') || '').split(/\s+/).includes('right'))
-                return { visibleAtMs: Date.now(), nativeId: root.id };
-              return null;
-            }, { accountId: intent.accountId, conversationId: intent.conversationId, expected: cardConfig.visibleName, expectedNativeId, cutoff: Number(match.sixin_message.created_at) });
-            if (visible) return { serverStatus: 'confirmed', accountId: intent.accountId, conversationId: intent.conversationId,
-              type: 'CARD', cardTitle: cardConfig.title, platformTimeMs: Number(match.sixin_message.created_at), observedAtMs: Date.now(), visibleAtMs: visible.visibleAtMs,
-              senderId: String(match.sixin_message.sender_id), receiverId: String(match.sixin_message.receiver_id), direction: 'OUTBOUND', nativeId: visible.nativeId };
-          }
-        } else {
-          const match = candidates.find(row => (row.sixin_message.message_type || row.sixin_message.type) === 'TEXT');
-          if (match) {
-            const expectedNativeId = 'id_' + String(match.sixin_message.id);
-            const visible = await page.evaluate(({ accountId, conversationId, expected, expectedNativeId, cutoff }) => {
-              const rendered = el => el?.checkVisibility ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : Boolean(el?.getClientRects?.().length);
-              const active = Array.from(document.querySelectorAll('.sx-contact-item.active')).filter(rendered);
-              if (active.length !== 1 || active[0].getAttribute('data-key') !== 'Total-' + conversationId) return null;
-              const roots = Array.from(document.querySelectorAll('.im-msg-item[id^="id_' + accountId + '.' + conversationId + '."],.im-msg-item[id^="id_' + conversationId + '.' + accountId + '."]')).filter(rendered);
-              for (const root of roots) if (root.id === expectedNativeId && String(root.innerText || '').includes(expected) &&
-                Number(root.querySelector('[data-timestamp]')?.getAttribute('data-timestamp')) === cutoff &&
-                String(root.querySelector('[id^="jarvis-msg-"]')?.getAttribute('class') || '').split(/\s+/).includes('right'))
-                return { visibleAtMs: Date.now(), nativeId: root.id };
-              return null;
-            }, { accountId: intent.accountId, conversationId: intent.conversationId, expected: intent.content, expectedNativeId, cutoff: Number(match.sixin_message.created_at) });
-            if (visible) return { serverStatus: 'confirmed', accountId: intent.accountId, conversationId: intent.conversationId,
-              content: intent.content, type: 'TEXT', platformTimeMs: Number(match.sixin_message.created_at), observedAtMs: Date.now(), visibleAtMs: visible.visibleAtMs,
-              senderId: String(match.sixin_message.sender_id), receiverId: String(match.sixin_message.receiver_id), direction: 'OUTBOUND', nativeId: visible.nativeId };
-          }
+          .flatMap(record => deepFindMessages(record.body).filter(row => nativeMessageMatchesOutboundIntent(row,intent,startedAtMs,cardConfig))
+            .map(row => ({row,observedAtMs:record.receivedAtMs||Date.now()})));
+        const match = candidates.find(({row}) => (row.sixin_message.message_type || row.sixin_message.type) === (intent.kind === 'card' ? 'CARD' : 'TEXT'));
+        if (match) {
+          const message=match.row.sixin_message;
+          return { serverStatus: 'confirmed', accountId: intent.accountId, conversationId: intent.conversationId,
+            ...(intent.kind === 'card'?{type:'CARD',cardTitle:cardConfig.title}:{content:intent.content,type:'TEXT'}),
+            platformTimeMs: Number(message.created_at), observedAtMs: match.observedAtMs, visibleAtMs: null,
+            senderId: String(message.sender_id), receiverId: String(message.receiver_id), direction: 'OUTBOUND', nativeId: 'id_' + String(message.id) };
         }
         await new Promise(resolve => setTimeout(resolve, 25));
       }

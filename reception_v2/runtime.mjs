@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 
 const LOCK='reception-v2.lock', HEALTH='reception-v2-health.json';
 export const POLL_INTERVAL_MS=250;
+function isNavigationRecoveryError(error){const text=String(error?.message||error||'');return /unexpected_sidebar_route|account_title_not_ready|account_title_mismatch/i.test(text);}
 function isFatalBrowserError(error){const text=String(error?.message||error||'');return /Target crashed|Target page, context or browser has been closed|context or browser has been closed|browser has been closed|page has been closed|page_evaluate: Target closed/i.test(text);}
 function atomicJson(file,value){fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});const temp=file+'.'+process.pid+'.tmp';
   fs.writeFileSync(temp,JSON.stringify(value,null,2)+'\n',{encoding:'utf8',mode:0o600,flag:'wx'});try{fs.renameSync(temp,file);}finally{if(fs.existsSync(temp))fs.unlinkSync(temp);}fs.chmodSync(file,0o600);}
@@ -70,9 +71,9 @@ export function createRuntime({runtimeDir,accountId,armed=false,pilotOne=false,d
   async function runTick(){
     if(!release)throw new Error('runtime_not_running');
     try{
-      await ensureBrowser();let result;
+      if(browser?.isTransportHealthy?.()===false)await recoverBrowser();else await ensureBrowser();let result;
       try{result=await poll();}
-      catch(error){if(!isFatalBrowserError(error))throw error;await recoverBrowser();result=await poll();}
+      catch(error){if(isNavigationRecoveryError(error)&&typeof deps.recoverBrowserNavigation==='function'){await deps.recoverBrowserNavigation();result=await poll();}else if(isFatalBrowserError(error)){await recoverBrowser();result=await poll();}else throw error;}
       if(armed&&deps.orchestrator){lastError=result?.failed?.length?result.failed[0].error:null;const health=writeHealth({successfulRead:result?.successfulRead===true,candidates:result?.processed??null,activeUid:result?.result?.uid||null,sendState:result?.failed?.length?'row_failed':'idle',error:lastError});await deps.afterTick?.();return health;}
       lastError=null;return writeHealth({successfulRead:true,candidates:result.rows?.length??0,sendState:'read_only'});
     }catch(error){lastError=error.message;return writeHealth({sendState:isFatalBrowserError(error)?'browser_recovery_failed':'idle',error:error.message});}

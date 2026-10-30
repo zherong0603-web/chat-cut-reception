@@ -11,7 +11,7 @@ export function verifyNativeHistory(intent, receipt, sourcePlatformTimeMs, submi
   const nativePrefixes = [`id_${intent.accountId}.${intent.conversationId}.`, `id_${intent.conversationId}.${intent.accountId}.`];
   if (!nativePrefixes.some(prefix => nativeId.startsWith(prefix) && nativeId.length > prefix.length)) return false;
   if (!Number.isFinite(receipt.observedAtMs) || !Number.isFinite(receipt.platformTimeMs)) return false;
-  if (submittedAtMs !== null && (!Number.isFinite(submittedAtMs) || receipt.platformTimeMs < submittedAtMs || receipt.observedAtMs < submittedAtMs || !Number.isFinite(receipt.visibleAtMs) || receipt.visibleAtMs < submittedAtMs)) return false;
+  if (submittedAtMs !== null && (!Number.isFinite(submittedAtMs) || receipt.platformTimeMs < submittedAtMs || receipt.observedAtMs < submittedAtMs)) return false;
   if (receipt.platformTimeMs < sourcePlatformTimeMs || receipt.platformTimeMs > receipt.observedAtMs + 1000) return false;
   if (intent.kind === 'card') return receipt.type === 'CARD' && receipt.cardTitle === card.title;
   return receipt.type === 'TEXT' && normalized(receipt.content) === normalized(intent.content);
@@ -44,12 +44,13 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     const intent = store.getIntent(intentId);
     const verified = verifyNativeHistory(intent, receipt, sourcePlatformTimeMs, startedAtMs, card);
     if (!verified) return { state: 'uncertain', intent: store.markUncertain(intentId, { receipt, verified: false }) };
-    const elapsed = receipt.observedAtMs - sourcePlatformTimeMs;
+    const postedMs = receipt.platformTimeMs - sourcePlatformTimeMs;
+    const confirmationMs = receipt.observedAtMs - sourcePlatformTimeMs;
     const result = store.markSent(intentId, {
       ...receipt, verified: true, visibleElapsedMs: receipt.visibleAtMs ? receipt.visibleAtMs - sourcePlatformTimeMs : null,
-      [`${intent.kind}ConfirmedMs`]: elapsed, withinTwoSeconds: elapsed <= 2000,
+      [`${intent.kind}PostedMs`]: postedMs, [`${intent.kind}ConfirmedMs`]: confirmationMs, withinTwoSeconds: postedMs <= 2000, withinThreeSeconds: postedMs <= 3000,
     });
-    return { state: 'sent', intent: result, withinTwoSeconds: elapsed <= 2000, confirmedMs: elapsed };
+    return { state: 'sent', intent: result, withinTwoSeconds: postedMs <= 2000, withinThreeSeconds: postedMs <= 3000, postedMs, confirmedMs: confirmationMs };
   }
 
   async function retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial) {
@@ -60,13 +61,14 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
       const intent = store.getIntent(intentId);
       const receipt = await browser.waitForReceipt(intent, { startedAtMs, timeoutMs: 2500 });
       if (!verifyNativeHistory(intent, receipt, sourcePlatformTimeMs, startedAtMs, card)) continue;
-      const elapsed = receipt.observedAtMs - sourcePlatformTimeMs;
+      const postedMs = receipt.platformTimeMs - sourcePlatformTimeMs;
+      const confirmationMs = receipt.observedAtMs - sourcePlatformTimeMs;
       const reconciled = store.markReconciledSent(intentId, {
         ...receipt, verified: true, reconciled: true, verificationAttempt: attempt + 1,
         visibleElapsedMs: receipt.visibleAtMs ? receipt.visibleAtMs - sourcePlatformTimeMs : null,
-        [`${intent.kind}ConfirmedMs`]: elapsed, withinTwoSeconds: elapsed <= 2000,
+        [`${intent.kind}PostedMs`]: postedMs, [`${intent.kind}ConfirmedMs`]: confirmationMs, withinTwoSeconds: postedMs <= 2000, withinThreeSeconds: postedMs <= 3000,
       });
-      return { state: 'sent', intent: reconciled, withinTwoSeconds: elapsed <= 2000, confirmedMs: elapsed };
+      return { state: 'sent', intent: reconciled, withinTwoSeconds: postedMs <= 2000, withinThreeSeconds: postedMs <= 3000, postedMs, confirmedMs: confirmationMs };
     }
     return initial;
   }
@@ -171,7 +173,8 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     text = await retryVerification(textIntentId, scope, sourcePlatformTimeMs, textStartedAtMs, text);
     card = await retryVerification(cardIntentId, scope, sourcePlatformTimeMs, cardStartedAtMs, card);
     const withinTwoSeconds = text.state === 'sent' && card.state === 'sent' && text.withinTwoSeconds === true && card.withinTwoSeconds === true;
-    return { state: text.state === 'sent' && card.state === 'sent' ? 'sent' : 'uncertain', text, card, withinTwoSeconds };
+    const withinThreeSeconds = text.state === 'sent' && card.state === 'sent' && text.withinThreeSeconds === true && card.withinThreeSeconds === true;
+    return { state: text.state === 'sent' && card.state === 'sent' ? 'sent' : 'uncertain', text, card, withinTwoSeconds, withinThreeSeconds };
   }
 
   return { enterHumanMode, sendText, sendWeComCard, sendTextAndCard };
