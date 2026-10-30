@@ -217,3 +217,10 @@ test('window closing during text retry creates no prepared card retry',async()=>
   const o=createOrchestrator({...f.orchestrator.deps,sender,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
   try{const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});const intents=f.store.listIntents(result.turn.turnId);assert.equal(textRetries,1);assert.equal(cardRetries,0);assert.equal(intents.filter(i=>i.kind==='card').length,1);assert.equal(intents.filter(i=>i.state==='prepared').length,0);assert.equal(intents.find(i=>i.kind==='text'&&i.intentId!==intents[0].intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
+
+
+test('sender outside-window result does not leave the turn waiting for contact',async()=>{
+  const f=fixture();const sender={enterHumanMode:async()=>({clicked:true}),sendTextAndCard:async(textId,cardId)=>{f.store.markFailed(textId,'outside_reply_hours');f.store.markFailed(cardId,'outside_reply_hours');return{state:'outside_reply_hours',text:{state:'failed'},card:{state:'failed'}}},sendText:async()=>{throw new Error('unexpected')},sendWeComCard:async()=>{throw new Error('unexpected')}};
+  const o=createOrchestrator({...f.orchestrator.deps,sender});
+  try{const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});assert.equal(result.state,'needs_human');assert.equal(f.store.listIntents(result.turn.turnId).filter(i=>i.state==='prepared').length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});

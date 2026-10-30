@@ -193,7 +193,7 @@ export function createOrchestrator(deps) {
           completed: '为避免重复回复，本次没有再次发送', next: '请人工回复客户的新问题' });
         return { state: ConversationState.NEEDS_HUMAN, reason: 'duplicate_generated_reply_prevented', turn, reply };
       }
-      let textResult, cardIntent = null, cardResult = null, bothWithinTwoSeconds = null, bothWithinThreeSeconds = null;
+      let textResult, cardIntent = null, cardResult = null, bothWithinTwoSeconds = null, bothWithinThreeSeconds = null, pairOutsideWindow = false;
       if (reply.offerCard && !nativeCardAlreadySent) {
         try {
           cardIntent = deps.store.createIntent({ turnId: turn.turnId, kind: 'card', payload: { cardTitle: card.title } });
@@ -202,6 +202,7 @@ export function createOrchestrator(deps) {
         }
         if (cardIntent) {
           const pair = await deps.sender.sendTextAndCard(textIntent.intentId, cardIntent.intentId, scope, turn.openedAtMs);
+          pairOutsideWindow = pair.state === 'outside_reply_hours';
           textResult = pair.text || { state: pair.state };
           cardResult = pair.card || { state: pair.state };
           bothWithinTwoSeconds = pair.withinTwoSeconds; bothWithinThreeSeconds = pair.withinThreeSeconds;
@@ -251,9 +252,10 @@ export function createOrchestrator(deps) {
       let fallbackResult = null;
 
       const sendUncertain = textResult.state === 'uncertain' || cardResult?.state === 'uncertain';
+      const outsideWindow = pairOutsideWindow || textResult.state === 'outside_reply_hours' || cardResult?.state === 'outside_reply_hours';
 
       const timingFailed = (textResult.state === 'sent' && textResult.withinThreeSeconds === false) || (cardResult?.state === 'sent' && cardResult.withinThreeSeconds === false);
-      const nextState = reply.needsHuman || sendUncertain || timingFailed ? ConversationState.NEEDS_HUMAN : reply.nextState===ConversationState.STOPPED ? ConversationState.STOPPED : ConversationState.WAITING_CONTACT;
+      const nextState = reply.needsHuman || sendUncertain || outsideWindow || timingFailed ? ConversationState.NEEDS_HUMAN : reply.nextState===ConversationState.STOPPED ? ConversationState.STOPPED : ConversationState.WAITING_CONTACT;
       deps.store.setConversationState(scope.accountId, scope.conversationId, nextState);
       deps.store.setTurnState(turn.turnId, nextState);
       if (timingFailed && !sendUncertain) {

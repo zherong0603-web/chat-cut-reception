@@ -117,7 +117,7 @@ test('three-second target uses platform post time rather than slow confirmation 
 test('sender hard-stops before any browser action outside reply hours',async()=>{
   const f=fixture({senderOptions:{replySchedule:{isAllowed:()=>false,state:()=>({allowed:false,reason:'closed'})}}});
   const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
-  try{await assert.rejects(()=>f.sender.sendText(intent.intentId,f.scope,1000),/outside_reply_hours/);assert.equal(f.store.getIntent(intent.intentId).state,'prepared');assert.equal(f.browser.calls.length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+  try{const result=await f.sender.sendText(intent.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.store.getIntent(intent.intentId).state,'failed');assert.equal(f.browser.calls.length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
 test('reply window is rechecked immediately before final text and card clicks',async()=>{
@@ -152,4 +152,11 @@ test('DOM-level window close before pair card click marks card failed and text u
 test('DOM-level window close before standalone card click marks card failed',async()=>{
   const f=fixture();f.browser.state.manual=true;f.browser.sendCard=async()=>{throw new Error('outside_reply_hours')};const card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
   try{const result=await f.sender.sendWeComCard(card.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.store.getIntent(card.intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+
+test('pair entry closes both original intents without leaving prepared rows',async()=>{
+  const f=fixture({senderOptions:{replySchedule:{isAllowed:()=>false,state:()=>({allowed:false,reason:'closed'})}}});
+  const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});const card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+  try{const result=await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.store.getIntent(text.intentId).state,'failed');assert.equal(f.store.getIntent(card.intentId).state,'failed');assert.equal(f.browser.calls.length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });

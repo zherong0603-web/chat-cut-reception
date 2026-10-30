@@ -87,9 +87,9 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
   }
 
   async function sendText(intentId, scope, sourcePlatformTimeMs) {
-    assertReplyWindow();
     const intent = store.getIntent(intentId);
     if (!['text', 'contact_fallback'].includes(intent.kind) || intent.state !== OutboxState.PREPARED) throw new Error('intent_not_prepared');
+    try{assertReplyWindow();}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};throw error;}
     const mode = await browser.mode(scope);
     if (mode.pageVisible === false) throw new Error('page_not_visible');
     if (mode.conversationId && mode.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
@@ -119,9 +119,9 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
   }
 
   async function sendWeComCard(intentId, scope, sourcePlatformTimeMs) {
-    assertReplyWindow();
     const intent = store.getIntent(intentId);
     if (intent.kind !== 'card' || intent.state !== OutboxState.PREPARED) throw new Error('intent_not_prepared');
+    try{assertReplyWindow();}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};throw error;}
     const mode = await browser.mode(scope);
     if (mode.pageVisible === false) throw new Error('page_not_visible');
     if (mode.conversationId && mode.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
@@ -143,10 +143,10 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
 
 
   async function sendTextAndCard(textIntentId, cardIntentId, scope, sourcePlatformTimeMs) {
-    assertReplyWindow();
     const textIntent = store.getIntent(textIntentId), cardIntent = store.getIntent(cardIntentId);
     if (textIntent.kind !== 'text' || textIntent.state !== OutboxState.PREPARED ||
         cardIntent.kind !== 'card' || cardIntent.state !== OutboxState.PREPARED) throw new Error('intent_not_prepared');
+    try{assertReplyWindow();}catch(error){if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,'outside_reply_hours');store.markFailed(cardIntentId,'outside_reply_hours');return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}throw error;}
     const mode = await browser.mode(scope);
     if (mode.pageVisible === false) throw new Error('page_not_visible');
     if (mode.conversationId && mode.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
