@@ -81,4 +81,5 @@ test('browser launch options use the full Chromium executable instead of old hea
   const {browserLaunchOptions}=await import('../browser.mjs');
   const chromium={executablePath:()=>'/cache/chromium/Google Chrome for Testing'};
   assert.deepEqual(browserLaunchOptions({chromium,headless:true,env:{}}),{headless:true,executablePath:'/cache/chromium/Google Chrome for Testing'});
+  assert.deepEqual(browserLaunchOptions({chromium,headless:false,env:{}}),{headless:false,executablePath:'/cache/chromium/Google Chrome for Testing',args:['--window-position=-10000,-10000']});
 });

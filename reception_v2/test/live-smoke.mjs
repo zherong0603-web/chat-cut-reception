@@ -8,7 +8,7 @@ if (!readOnly) throw new Error('live_smoke_is_read_only_only');
 const configured = loadAccountConfig({ cwd: process.cwd(), env: process.env });
 const expected = { id: configured.accountId, name: configured.accountName };
 const runtime = configured.runtimeDir;
-const browser = await openBrowser({ profileDir: path.join(runtime, 'isolated-browser-profile'), headless: true, accountId: expected.id, accountName: expected.name, card: configured.card });
+const browser = await openBrowser({ profileDir: path.join(runtime, 'isolated-browser-profile'), headless: false, accountId: expected.id, accountName: expected.name, card: configured.card });
 try {
   const sidebar = await readSidebar(browser.page, expected);
   const row=sidebar.rows.find(value=>value.needsReply===true)||sidebar.rows[0];

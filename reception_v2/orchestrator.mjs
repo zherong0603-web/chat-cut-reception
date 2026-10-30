@@ -58,8 +58,10 @@ export function createOrchestrator(deps) {
   const card = deps.card || DEFAULT_CARD;
   const required = ['store','sender','composeReply','facts','readSidebar','selectConversation','readContacts','revealMaskedContacts','notifier','now','accountId'];
   for (const key of required) if (!deps[key]) throw new TypeError('missing_dependency_' + key);
-  const state = { baselineReady: false, seen: new Map(), replyCheckAt: new Map(), takeoverRetryAt: new Map(), processing: false, contactCursor: 0, nextContactScanAt: 0 };
+  const state = { baselineReady: false, seen: new Map(), replyCheckAt: new Map(), takeoverRetryAt: new Map(), contactFailureUntil: new Map(), processing: false, contactCursor: 0, nextContactScanAt: 0 };
   const fingerprint=row=>JSON.stringify([row.time??null,row.preview??'',row.statusTags||[],row.statusText||'']);
+  const contactReady=row=>clock()>=(state.contactFailureUntil.get(row.uid)||0);
+  const deferContact=row=>state.contactFailureUntil.set(row.uid,clock()+300_000);
   const clock=deps.now;
   const sleep=deps.sleep||(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
   const stopping=()=>deps.isStopping?.()===true;
@@ -303,11 +305,11 @@ export function createOrchestrator(deps) {
       try { results.push({ uid: row.uid, ...(await processRow(row)) }); }
       catch (error) { recordFailure(row,error,'row_failed');await notifyFailure(row,error,'row_failed'); }
     }
-    const contactRows=processToday?(sidebar.rows||[]).filter(row=>isTodaySidebarTime(row.time,clock())):(sidebar.rows||[]);
+    const contactRows=(processToday?(sidebar.rows||[]).filter(row=>isTodaySidebarTime(row.time,clock())):(sidebar.rows||[])).filter(contactReady);
     for (const row of contactScan ? contactRows : []) {
       if(overdueUids.has(row.uid))continue;
-      try { const result=await processRow(row,{contactOnly:true}); if(result.state===ConversationState.CONTACT_OBTAINED)results.push({uid:row.uid,...result}); }
-      catch(error){recordFailure(row,error,'contact_scan_failed');await notifyFailure(row,error,'contact_scan_failed');}
+      try { const result=await processRow(row,{contactOnly:true});state.contactFailureUntil.delete(row.uid);if(result.state===ConversationState.CONTACT_OBTAINED)results.push({uid:row.uid,...result}); }
+      catch(error){deferContact(row);recordFailure(row,error,'contact_scan_failed');await notifyFailure(row,error,'contact_scan_failed');}
     }
     const takeover = await takeoverRows(sidebar.rows || [], { maxRows });
     for (const failure of takeover.failed) recordFailure({ uid: failure.uid }, new Error(failure.error), 'human_takeover_failed');
@@ -350,8 +352,8 @@ export function createOrchestrator(deps) {
       for(const failure of takeover.failed)failed.push({uid:failure.uid,error:failure.error});
       if(takeover.processed)return{processed:takeover.processed,takeover,failed,successfulRead:true};
     }
-    const allRows=(sidebar.rows||[]).filter(row=>isTodaySidebarTime(row.time,clock()));
-    if(allRows.length && clock()>=state.nextContactScanAt){const row=allRows[state.contactCursor++%allRows.length];state.nextContactScanAt=clock()+1000;try{const result=await processRow(row,{contactOnly:true});return {processed:result.state===ConversationState.CONTACT_OBTAINED?1:0,contact_scan:result, failed, successfulRead:true};}catch(error){failed.push({uid:row.uid,error:error?.message||'contact_scan_failed'});try{await enqueue({kind:'needs_operator',accountId:deps.accountId,conversationId:row.uid,customer:row.nickname||'当前客户',need:row.preview||'新消息',contact:'自动接待失败',completed:'本轮没有完成客户操作',next:'请人工查看这个客户',details:{phase:'poll_contact_scan_failed',error:String(error?.message||'contact_scan_failed').slice(0,160)}});}catch{}}}
+    const allRows=(sidebar.rows||[]).filter(row=>isTodaySidebarTime(row.time,clock())&&contactReady(row));
+    if(allRows.length && clock()>=state.nextContactScanAt){const row=allRows[state.contactCursor++%allRows.length];state.nextContactScanAt=clock()+1000;try{const result=await processRow(row,{contactOnly:true});state.contactFailureUntil.delete(row.uid);return {processed:result.state===ConversationState.CONTACT_OBTAINED?1:0,contact_scan:result, failed, successfulRead:true};}catch(error){deferContact(row);failed.push({uid:row.uid,error:error?.message||'contact_scan_failed'});try{await enqueue({kind:'needs_operator',accountId:deps.accountId,conversationId:row.uid,customer:row.nickname||'当前客户',need:row.preview||'新消息',contact:'自动接待失败',completed:'本轮没有完成客户操作',next:'请人工查看这个客户',details:{phase:'poll_contact_scan_failed',error:String(error?.message||'contact_scan_failed').slice(0,160)}});}catch{}}}
     return { processed: 0, failed, successfulRead: true };
   }
 

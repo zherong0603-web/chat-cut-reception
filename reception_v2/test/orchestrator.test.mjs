@@ -141,3 +141,10 @@ test('card intents use the configured native card title',async()=>{
   const sender=createSender({store:f.store,browser:f.browser,card,now:()=>1800});const o=createOrchestrator({...f.orchestrator.deps,sender,card});
   try{const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});const cardIntent=f.store.listIntents(result.turn.turnId).find(intent=>intent.kind==='card');assert.equal(cardIntent.state,'sent');assert.equal(cardIntent.payload.cardTitle,card.title);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
+
+test('a failed background contact scan backs off instead of blocking every poll',async()=>{
+  let now=new Date(2026,9,28,10,0,0).getTime();
+  const f=fixture({rows:[{uid:u1,nickname:'甲',needsReply:false,leadSignal:true,time:'10:00:00'}]});
+  let selections=0;const o=createOrchestrator({...f.orchestrator.deps,selectConversation:async()=>{selections++;throw new Error('exact_visible_customer_row_required')},now:()=>now});
+  try{await o.pollOnce();assert.equal(selections,1);now+=2000;await o.pollOnce();assert.equal(selections,1);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});

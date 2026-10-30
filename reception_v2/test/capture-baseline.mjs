@@ -6,7 +6,7 @@ import { readSidebar } from '../sidebar.mjs';
 const configured=loadAccountConfig({cwd:process.cwd(),env:process.env});
 const account={id:configured.accountId,name:configured.accountName};
 const runtime=configured.runtimeDir;
-const browser=await openBrowser({profileDir:path.join(runtime,'isolated-browser-profile'),headless:true,accountId:account.id,accountName:account.name,card:configured.card});
+const browser=await openBrowser({profileDir:path.join(runtime,'isolated-browser-profile'),headless:false,accountId:account.id,accountName:account.name,card:configured.card});
 try{
  const sidebar=await readSidebar(browser.page,account);
  const baseline={captured_at_utc:new Date().toISOString(),classification:'reception_v2_readonly_baseline',account_id:account.id,sends_performed:0,

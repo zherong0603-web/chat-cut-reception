@@ -7,7 +7,7 @@ const configured = loadAccountConfig({ cwd: process.cwd(), env: process.env });
 const account = { id: configured.accountId, name: configured.accountName };
 const browser = await openBrowser({
   profileDir: path.join(configured.runtimeDir, 'isolated-browser-profile'),
-  headless: true,
+  headless: false,
   accountId: account.id,
   accountName: account.name,
   card: configured.card,

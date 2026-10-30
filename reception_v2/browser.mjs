@@ -126,7 +126,7 @@ export async function selectVisibleConversation(page, scope, modeFn) {
 
 export function browserLaunchOptions({ chromium, headless, env = process.env }) {
   const executablePath=String(env.XHS_BROWSER_EXECUTABLE||'').trim() || (typeof chromium?.executablePath==='function'?chromium.executablePath():null);
-  return { headless, ...(executablePath?{executablePath}:{}) };
+  return { headless, ...(executablePath?{executablePath}:{}), ...(headless?{}:{args:['--window-position=-10000,-10000']}) };
 }
 
 async function waitForInbox(page, accountName) {
@@ -174,7 +174,7 @@ export async function openInteractiveLogin({ profileDir, accountName, timeoutMs 
   }
 }
 
-export async function openBrowser({ profileDir, headless = true, accountId, accountName, card: cardConfig = DEFAULT_CARD }) {
+export async function openBrowser({ profileDir, headless = false, accountId, accountName, card: cardConfig = DEFAULT_CARD }) {
   const chromium = await loadChromium();
   fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(profileDir, 0o700);
