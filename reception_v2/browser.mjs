@@ -33,7 +33,7 @@ export function activeConversationRootLocator(page, scope) {
   return page.locator('#walle-ad').filter({ has: exactActiveRow });
 }
 
-export async function prepareWeComCardPanel(root, card = DEFAULT_CARD) {
+export async function prepareWeComCardPanel(root, cardConfig = DEFAULT_CARD) {
   const segments = root.locator('.chat-tool-wrap .d-segment-item').filter({ hasText: /^名片$/, visible: true });
   if (await segments.count() !== 1) {
     const existing = root.locator('.chat-tool-wrap .tabs-wrap .d-tabs-header').filter({ hasText: /^获客工具$/, visible: true });
@@ -47,7 +47,22 @@ export async function prepareWeComCardPanel(root, card = DEFAULT_CARD) {
   await segments.waitFor({ state: 'visible', timeout: 1500 });
   if (await segments.count() !== 1) throw new Error('unique_native_card_tab_required');
   await segments.click({ timeout: 1500 });
-  await root.locator('.chat-tool-wrap .card-box__content-title[title="' + card.title + '"]').filter({ visible: true }).waitFor({ state: 'visible', timeout: 2000 });
+  await root.locator('.chat-tool-wrap .card-box__content-title[title="' + cardConfig.title + '"]').filter({ visible: true }).waitFor({ state: 'visible', timeout: 2000 });
+}
+
+export async function sendConfiguredWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {} }) {
+  await assertActive(scope);
+  const root = activeConversationRootLocator(page, scope);
+  if (await root.count() !== 1) throw new Error('exact_active_conversation_root_required');
+  await prepareWeComCardPanel(root, cardConfig); await assertActive(scope);
+  const title = root.locator('.chat-tool-wrap .card-box__content-title[title="' + cardConfig.title + '"]').filter({ visible: true });
+  if (await title.count() !== 1) throw new Error('exact_native_wecom_card_required');
+  const cardElement = title.locator('..').locator('..');
+  if (await cardElement.count() !== 1) throw new Error('exact_native_wecom_card_required');
+  await cardElement.hover({ timeout: 1000 });
+  const button = cardElement.getByRole('button', { name: '发送', exact: true });
+  if (await button.count() !== 1 || !(await button.isEnabled())) throw new Error('unique_enabled_card_send_required');
+  await button.click({ timeout: 1000 }); await assertActive(scope);
 }
 
 function deepFindMessages(value) {
@@ -138,7 +153,7 @@ export async function openInteractiveLogin({ profileDir, accountName, timeoutMs 
   }
 }
 
-export async function openBrowser({ profileDir, headless = true, accountId, accountName, card = DEFAULT_CARD }) {
+export async function openBrowser({ profileDir, headless = true, accountId, accountName, card: cardConfig = DEFAULT_CARD }) {
   const chromium = await loadChromium();
   fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(profileDir, 0o700);
@@ -244,23 +259,13 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
       const button = root.locator('.reply-bottom-bar button').filter({ visible: true });
       if (await button.count() !== 1 || !(await button.isEnabled())) throw new Error('unique_enabled_send_control_required');
       await button.click({ timeout: 1000 }); await assertActive(scope); },
-    async sendCard(scope) { await assertActive(scope); const root = activeConversationRootLocator(page, scope);
-      if (await root.count() !== 1) throw new Error('exact_active_conversation_root_required');
-      await prepareWeComCardPanel(root, card); await assertActive(scope);
-      const title = root.locator('.chat-tool-wrap .card-box__content-title[title="' + card.title + '"]').filter({ visible: true });
-      if (await title.count() !== 1) throw new Error('exact_native_wecom_card_required');
-      const card = title.locator('..').locator('..');
-      if (await card.count() !== 1) throw new Error('exact_native_wecom_card_required');
-      await card.hover({ timeout: 1000 });
-      const button = card.getByRole('button', { name: '发送', exact: true });
-      if (await button.count() !== 1 || !(await button.isEnabled())) throw new Error('unique_enabled_card_send_required');
-      await button.click({ timeout: 1000 }); await assertActive(scope); },
+    async sendCard(scope) { return sendConfiguredWeComCard({ page, scope, cardConfig, assertActive }); },
     async waitForReceipt(intent, { startedAtMs = 0, timeoutMs = 2000 } = {}) { const deadline = Date.now() + timeoutMs;
       while (Date.now() <= deadline) {
         const candidates = nativeRecords.filter(record => record.requestStartedAtMs >= startedAtMs && record.responseOk === true &&
           record.queryUserIds?.length === 1 && record.queryUserIds[0] === intent.conversationId)
           .flatMap(record => deepFindMessages(record.body)).filter(row => {
-          return nativeMessageMatchesOutboundIntent(row,intent,startedAtMs,card);
+          return nativeMessageMatchesOutboundIntent(row,intent,startedAtMs,cardConfig);
         });
         if (intent.kind === 'card') {
           const match = candidates.find(row => (row.sixin_message.message_type || row.sixin_message.type) === 'CARD');
@@ -276,9 +281,9 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
                 String(root.querySelector('[id^="jarvis-msg-"]')?.getAttribute('class') || '').split(/\s+/).includes('right'))
                 return { visibleAtMs: Date.now(), nativeId: root.id };
               return null;
-            }, { accountId: intent.accountId, conversationId: intent.conversationId, expected: card.visibleName, expectedNativeId, cutoff: Number(match.sixin_message.created_at) });
+            }, { accountId: intent.accountId, conversationId: intent.conversationId, expected: cardConfig.visibleName, expectedNativeId, cutoff: Number(match.sixin_message.created_at) });
             if (visible) return { serverStatus: 'confirmed', accountId: intent.accountId, conversationId: intent.conversationId,
-              type: 'CARD', cardTitle: card.title, platformTimeMs: Number(match.sixin_message.created_at), observedAtMs: Date.now(), visibleAtMs: visible.visibleAtMs,
+              type: 'CARD', cardTitle: cardConfig.title, platformTimeMs: Number(match.sixin_message.created_at), observedAtMs: Date.now(), visibleAtMs: visible.visibleAtMs,
               senderId: String(match.sixin_message.sender_id), receiverId: String(match.sixin_message.receiver_id), direction: 'OUTBOUND', nativeId: visible.nativeId };
           }
         } else {

@@ -63,3 +63,16 @@ test('native card history uses the configured account card identity',()=>{
   assert.equal(nativeMessageMatchesOutboundIntent(row,intent,2000,card),true);
   assert.equal(nativeMessageMatchesOutboundIntent(row,intent,2000),false);
 });
+
+test('configured card sender has no config shadowing and clicks the exact native card button',async()=>{
+  const cardConfig={title:'企微_账号B（企微）',visibleName:'账号B（企微）',id:'100200300',csaAccountNo:'9988776655',corpName:'@账号B企业'};
+  const calls=[];const button={count:async()=>1,isEnabled:async()=>true,click:async()=>calls.push('send')};
+  const cardLocator={locator(){return this},count:async()=>1,hover:async()=>calls.push('hover'),getByRole:()=>button};
+  const title={filter(){return this},waitFor:async()=>calls.push('title-visible'),count:async()=>1,locator(selector){calls.push('title-locator:'+selector);return cardLocator;}};
+  const segment={filter(){return this},count:async()=>1,waitFor:async()=>{},click:async()=>calls.push('tab')};
+  const root={count:async()=>1,locator(selector){if(selector.includes('.d-segment-item'))return segment;if(selector.includes('.card-box__content-title')){assert.match(selector,/企微_账号B/);return title;}throw new Error('unexpected_locator:'+selector);}};
+  const active={};const page={locator(selector){if(selector.includes('.sx-contact-item.active'))return active;if(selector==='#walle-ad')return{filter:()=>root};throw new Error('unexpected_page_locator:'+selector);}};
+  const {sendConfiguredWeComCard}=await import('../browser.mjs');
+  await sendConfiguredWeComCard({page,scope,cardConfig,assertActive:async()=>calls.push('active')});
+  assert.deepEqual(calls.filter(x=>['active','title-visible','tab','hover','send'].includes(x)),['active','tab','title-visible','active','hover','send','active']);
+});

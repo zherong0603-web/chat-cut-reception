@@ -74,3 +74,30 @@ test('stuck cleanup marker never returns an unowned lock',()=>{
     assert.equal(JSON.parse(fs.readFileSync(lock,'utf8')).pid,999999);
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('fatal page target crash closes the broken transport and relaunches before the next poll',async()=>{
+  const dir=root();let launches=0,transportCloses=0,polls=0;
+  const deps={
+    launchBrowser:async()=>({instance:++launches}),
+    closeBrowser:async()=>{},
+    closeBrowserTransport:async()=>{transportCloses++;},
+    readSidebar:async()=>({rows:[]}),
+    orchestrator:{
+      sweepVisibleOverdue:async()=>({processed:0,successfulRead:true}),
+      pollOnce:async()=>{polls++;if(polls===1)throw new Error('page_evaluate: Target crashed');return {processed:1,result:{uid:'b'},failed:[],successfulRead:true};},
+    },
+  };
+  const r=createRuntime({runtimeDir:dir,accountId:'a',armed:true,deps});
+  try{
+    await r.start();await r.tick();const health=readHealth(dir);
+    assert.equal(launches,2);assert.equal(transportCloses,1);assert.equal(polls,2);
+    assert.equal(health.error,null);assert.equal(health.send_state,'idle');assert(health.last_successful_sidebar_read_at);
+  }finally{await r.stop();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('non-fatal poll failure does not restart a healthy browser',async()=>{
+  const dir=root();let launches=0,transportCloses=0;
+  const deps={launchBrowser:async()=>({instance:++launches}),closeBrowser:async()=>{},closeBrowserTransport:async()=>{transportCloses++;},readSidebar:async()=>({rows:[]}),orchestrator:{sweepVisibleOverdue:async()=>({processed:0,successfulRead:true}),pollOnce:async()=>{throw new Error('sidebar_read_failed');}}};
+  const r=createRuntime({runtimeDir:dir,accountId:'a',armed:true,deps});
+  try{await r.start();await r.tick();assert.equal(launches,1);assert.equal(transportCloses,0);assert.equal(readHealth(dir).error,'sidebar_read_failed');}finally{await r.stop();fs.rmSync(dir,{recursive:true,force:true});}
+});

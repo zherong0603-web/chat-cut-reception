@@ -91,3 +91,10 @@ test('strict card history is verified against the configured card identity',()=>
   assert.equal(verifyNativeHistory(intent,receipt,1000,2000,card),true);
   assert.equal(verifyNativeHistory(intent,{...receipt,cardTitle:'企微_运去哪海外仓（企微）'},1000,2000,card),false);
 });
+
+test('card failure after text click never leaves text permanently sending',async()=>{
+  const f=fixture();f.browser.state.manual=true;f.browser.sendCard=async()=>{f.browser.calls.push('card');throw new Error('card_send_dom_changed')};
+  const textIntent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
+  const cardIntent=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+  try{const result=await f.sender.sendTextAndCard(textIntent.intentId,cardIntent.intentId,f.scope,1000);assert.equal(result.text.state,'uncertain');assert.equal(result.card.state,'uncertain');assert.equal(f.store.getIntent(textIntent.intentId).state,'uncertain');assert.equal(f.store.getIntent(cardIntent.intentId).state,'uncertain');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});

@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 
 const LOCK='reception-v2.lock', HEALTH='reception-v2-health.json';
 export const POLL_INTERVAL_MS=250;
+function isFatalBrowserError(error){const text=String(error?.message||error||'');return /Target crashed|Target page, context or browser has been closed|context or browser has been closed|browser has been closed|page has been closed|page_evaluate: Target closed/i.test(text);}
 function atomicJson(file,value){fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});const temp=file+'.'+process.pid+'.tmp';
   fs.writeFileSync(temp,JSON.stringify(value,null,2)+'\n',{encoding:'utf8',mode:0o600,flag:'wx'});try{fs.renameSync(temp,file);}finally{if(fs.existsSync(temp))fs.unlinkSync(temp);}fs.chmodSync(file,0o600);}
 function pidAlive(pid){if(!Number.isSafeInteger(pid)||pid<=0)return false;try{process.kill(pid,0);return true;}catch{return false;}}
@@ -63,12 +64,18 @@ export function createRuntime({runtimeDir,accountId,armed=false,pilotOne=false,d
       candidates,active_uid:activeUid,send_state:sendState,error:error?String(error).replace(/[^A-Za-z0-9_:-]/g,'_').slice(0,120):null,recorded_at_utc:now};
     atomicJson(healthPath,record);return record;
   }
+  async function poll(){return armed&&deps.orchestrator?deps.orchestrator.pollOnce():deps.readSidebar();}
+  async function ensureBrowser(){if(!browser)browser=await deps.launchBrowser();return browser;}
+  async function recoverBrowser(){try{await deps.closeBrowserTransport?.();}catch{}browser=null;return ensureBrowser();}
   async function runTick(){
     if(!release)throw new Error('runtime_not_running');
     try{
-      if(armed&&deps.orchestrator){const result=await deps.orchestrator.pollOnce();lastError=result?.failed?.length?result.failed[0].error:null;const health=writeHealth({successfulRead:result?.successfulRead===true,candidates:result?.processed??null,activeUid:result?.result?.uid||null,sendState:result?.failed?.length?'row_failed':'idle',error:lastError});await deps.afterTick?.();return health;}
-      const sidebar=await deps.readSidebar();lastError=null;return writeHealth({successfulRead:true,candidates:sidebar.rows?.length??0,sendState:'read_only'});
-    }catch(error){lastError=error.message;return writeHealth({error:error.message});}
+      await ensureBrowser();let result;
+      try{result=await poll();}
+      catch(error){if(!isFatalBrowserError(error))throw error;await recoverBrowser();result=await poll();}
+      if(armed&&deps.orchestrator){lastError=result?.failed?.length?result.failed[0].error:null;const health=writeHealth({successfulRead:result?.successfulRead===true,candidates:result?.processed??null,activeUid:result?.result?.uid||null,sendState:result?.failed?.length?'row_failed':'idle',error:lastError});await deps.afterTick?.();return health;}
+      lastError=null;return writeHealth({successfulRead:true,candidates:result.rows?.length??0,sendState:'read_only'});
+    }catch(error){lastError=error.message;return writeHealth({sendState:isFatalBrowserError(error)?'browser_recovery_failed':'idle',error:error.message});}
   }
   function tick(){if(currentTick)return currentTick;currentTick=runTick().finally(()=>{currentTick=null;});return currentTick;}
   async function start(){

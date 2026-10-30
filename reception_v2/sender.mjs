@@ -155,9 +155,10 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     const cardStartedAtMs = now(); store.markSending(cardIntentId, cardStartedAtMs);
     try { await browser.sendCard(scope); }
     catch (error) {
-      if (isPlatformBlock(error)) return { state: 'send_blocked', text: { state: 'sending', intent: store.getIntent(textIntentId) }, card: { state: 'send_blocked', intent: store.markFailed(cardIntentId, 'platform_blocked') } };
+      store.markUncertain(textIntentId, { error: 'card_send_failed_after_text_submit' });
+      if (isPlatformBlock(error)) return { state: 'send_blocked', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: { state: 'send_blocked', intent: store.markFailed(cardIntentId, 'platform_blocked') } };
       store.markUncertain(cardIntentId, { error: error?.message || 'send_error' });
-      return { state: 'uncertain', text: { state: 'sending', intent: store.getIntent(textIntentId) }, card: { state: 'uncertain', intent: store.getIntent(cardIntentId) } };
+      return { state: 'uncertain', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: { state: 'uncertain', intent: store.getIntent(cardIntentId) } };
     }
     const [textReceipt, cardReceipt] = await Promise.all([
       browser.waitForReceipt(store.getIntent(textIntentId), { startedAtMs: textStartedAtMs }),
