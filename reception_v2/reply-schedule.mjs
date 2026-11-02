@@ -8,17 +8,18 @@ function shanghaiParts(nowMs=Date.now()){
   return {year:values.year,month:values.month,day:values.day,hour:Number(values.hour),minute:Number(values.minute),second:Number(values.second)};
 }
 
-export function replyWindowState(nowMs=Date.now()){
+export function replyWindowState(nowMs=Date.now(),{overrideDates=[]}={}){
   const p=shanghaiParts(nowMs),localDate=`${p.year}-${p.month}-${p.day}`;
   const pad=n=>String(n).padStart(2,'0');
   const localTime=`${pad(p.hour)}:${pad(p.minute)}:${pad(p.second)}`;
-  const seconds=p.hour*3600+p.minute*60+p.second;
-  const allowed=seconds>=19*3600&&seconds<24*3600-30;
-  return {allowed,timezone:REPLY_TIME_ZONE,localDate,localTime,reason:allowed?'open':seconds>=24*3600-30?'cutoff':'closed'};
+  const seconds=p.hour*3600+p.minute*60+p.second,cutoff=seconds>=24*3600-30;
+  const override=overrideDates.includes(localDate);
+  const allowed=override?!cutoff:seconds>=19*3600&&!cutoff;
+  return {allowed,timezone:REPLY_TIME_ZONE,localDate,localTime,reason:override?(allowed?'date_override':'cutoff'):allowed?'open':cutoff?'cutoff':'closed',...(override?{allDay:true,overrideDate:localDate}:{})};
 }
 
-export function createReplySchedule({now=Date.now}={}){
-  return Object.freeze({isAllowed:()=>replyWindowState(now()).allowed,state:()=>replyWindowState(now())});
+export function createReplySchedule({now=Date.now,overrideDates=[]}={}){
+  return Object.freeze({isAllowed:()=>replyWindowState(now(),{overrideDates}).allowed,state:()=>replyWindowState(now(),{overrideDates})});
 }
 
 export function sidebarTimeInReplyWindow(value){

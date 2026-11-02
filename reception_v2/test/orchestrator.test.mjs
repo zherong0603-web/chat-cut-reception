@@ -224,3 +224,9 @@ test('sender outside-window result does not leave the turn waiting for contact',
   const o=createOrchestrator({...f.orchestrator.deps,sender});
   try{const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});assert.equal(result.state,'needs_human');assert.equal(f.store.listIntents(result.turn.turnId).filter(i=>i.state==='prepared').length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
+
+test('all-day override allows ordinary morning rows and expires by schedule state',async()=>{
+  const now=new Date(2026,10,2,10,0,0).getTime();const f=fixture({rows:[{uid:u1,nickname:'真实卖家',needsReply:true,preview:'美国仓报价',time:'10:00:00'}]});
+  const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:{isAllowed:()=>true,state:()=>({allowed:true,allDay:true,overrideDate:'2026-11-02',reason:'date_override'})}});
+  try{const result=await o.pollOnce();assert.equal(result.processed,1);assert.equal(f.store.listTurns(accountId,u1).length,1);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});

@@ -66,7 +66,7 @@ export function createOrchestrator(deps) {
   const deferContact=row=>state.contactFailureUntil.set(row.uid,clock()+300_000);
   const clock=deps.now;
   const replyWindow=()=>deps.replySchedule?.state?.()||{allowed:true,timezone:'Asia/Shanghai',localDate:null,localTime:null,reason:'unrestricted'};
-  const rowReplyEligible=row=>!deps.replySchedule||sidebarTimeInReplyWindow(row.time);
+  const rowReplyEligible=row=>{if(!deps.replySchedule)return true;const window=replyWindow();return window.allDay===true?isTodaySidebarTime(row.time,clock()):sidebarTimeInReplyWindow(row.time);};
   const setBaseline=rows=>{state.seen=new Map((rows||[]).map(row=>[row.uid,fingerprint(row)]));state.replyCheckAt=new Map((rows||[]).filter(row=>row.needsReply===true).map(row=>[row.uid,clock()+1000]));};
   const sleep=deps.sleep||(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
   const stopping=()=>deps.isStopping?.()===true;

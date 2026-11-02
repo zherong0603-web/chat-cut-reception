@@ -47,7 +47,7 @@ async function stopNotifier() {
 }
 
 const account=loadAccountConfig({cwd:process.cwd(),env:process.env});
-const replySchedule=createReplySchedule();
+const replySchedule=createReplySchedule({overrideDates:['2026-11-02']});
 const runtime=account.runtimeDir,ACCOUNT_ID=account.accountId,ACCOUNT_NAME=account.accountName;
 const args=process.argv.slice(2),command=args[0]||'status';
 function valueAfter(flag,fallback=null){const index=args.indexOf(flag);return index>=0&&args[index+1]?args[index+1]:fallback;}

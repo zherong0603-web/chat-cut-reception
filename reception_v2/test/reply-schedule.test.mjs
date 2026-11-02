@@ -30,3 +30,23 @@ test('sidebar clock times outside 19:00–23:59 are not eligible for startup rep
   assert.equal(sidebarTimeInReplyWindow('23:59:00'),true);
   assert.equal(sidebarTimeInReplyWindow('10/30'),false);
 });
+
+test('2026-11-02 full-day override expires automatically at midnight',async()=>{
+  const {replyWindowState}=await import('../reply-schedule.mjs');
+  const options={overrideDates:['2026-11-02']};
+  const morning=replyWindowState(at('2026-11-02T08:00:00+08:00'),options);
+  assert.equal(morning.allowed,true);assert.equal(morning.reason,'date_override');assert.equal(morning.allDay,true);
+  assert.equal(replyWindowState(at('2026-11-02T23:59:29+08:00'),options).allowed,true);
+  assert.equal(replyWindowState(at('2026-11-02T23:59:30+08:00'),options).allowed,false);
+  assert.equal(replyWindowState(at('2026-11-03T00:00:00+08:00'),options).allowed,false);
+  assert.equal(replyWindowState(at('2026-11-03T18:59:59+08:00'),options).allowed,false);
+  assert.equal(replyWindowState(at('2026-11-03T19:00:00+08:00'),options).allowed,true);
+});
+
+test('one-day override only changes the configured Shanghai date',async()=>{
+  const {replyWindowState}=await import('../reply-schedule.mjs');
+  const options={overrideDates:['2026-11-02']};
+  assert.equal(replyWindowState(at('2026-11-02T07:30:00+08:00'),options).localDate,'2026-11-02');
+  assert.equal(replyWindowState(at('2026-11-01T07:30:00+08:00'),options).allowed,false);
+  assert.equal(replyWindowState(at('2026-11-04T07:30:00+08:00'),options).allowed,false);
+});
