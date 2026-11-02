@@ -51,9 +51,9 @@ ${envXml}
   <key>ThrottleInterval</key>
   <integer>5</integer>
   <key>StandardOutPath</key>
-  <string>${xml(path.join(runtimeDir,'reception-v2-launchd.log'))}</string>
+  <string>${xml(path.join(runtimeDir,'reception-v2-launchd.stdout.log'))}</string>
   <key>StandardErrorPath</key>
-  <string>${xml(path.join(runtimeDir,'reception-v2-launchd.log'))}</string>
+  <string>${xml(path.join(runtimeDir,'reception-v2-launchd.stderr.log'))}</string>
 </dict>
 </plist>
 `;

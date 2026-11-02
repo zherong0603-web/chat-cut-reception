@@ -27,6 +27,8 @@ XHS_PLAYWRIGHT_MODULE=/已有/playwright/index.js reception_v2/launch-reception-
 
 生产运行由 `~/Library/LaunchAgents/com.chatcut.reception-v2.plist` 管理。该 LaunchAgent 在工作区直接执行 Node，不在“文稿”目录里再套一层 shell，因此不会触发额外的文件夹执行权限问题；`RunAtLoad` 负责登录后启动，`KeepAlive` 负责异常退出后拉起。
 
+标准输出和标准错误必须写入两个不同文件。macOS launchd 在当前环境里会把两者指向同一路径的配置直接拒绝为 `EX_CONFIG`，因此安装器使用 `reception-v2-launchd.stdout.log` 与 `reception-v2-launchd.stderr.log`；改 LaunchAgent 后先用 `plutil -lint` 校验，再检查 `launchctl print` 是否出现新的健康 PID。
+
 ```sh
 launchctl print gui/$(id -u)/com.chatcut.reception-v2
 node reception_v2/main.mjs status

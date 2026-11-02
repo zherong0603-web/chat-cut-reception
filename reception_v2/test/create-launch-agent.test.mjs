@@ -18,6 +18,11 @@ test('launch agent uses the selected account config and isolated runtime',()=>{
   assert.match(plist,/<key>XHS_PLAYWRIGHT_MODULE<\/key>\s*<string>\/opt\/playwright\/index\.js<\/string>/);
   assert.match(plist,/<string>run<\/string>\s*<string>--arm<\/string>/);
   assert.doesNotMatch(plist,/66879fef000000001c002839/);
+  const stdout=plist.match(/<key>StandardOutPath<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+  const stderr=plist.match(/<key>StandardErrorPath<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+  assert.equal(stdout,'/tmp/reception root/.runtime-b/reception-v2-launchd.stdout.log');
+  assert.equal(stderr,'/tmp/reception root/.runtime-b/reception-v2-launchd.stderr.log');
+  assert.notEqual(stdout,stderr);
 });
 
 test('launch agent rejects unsafe labels',()=>{
