@@ -50,11 +50,9 @@ export async function prepareWeComCardPanel(root, cardConfig = DEFAULT_CARD) {
   await root.locator('.chat-tool-wrap .card-box__content-title[title="' + cardConfig.title + '"]').filter({ visible: true }).waitFor({ state: 'visible', timeout: 2000 });
 }
 
-export async function sendConfiguredWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true }) {
-  await assertActive(scope);
+async function clickPreparedCardElement({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true }) {
   const root = activeConversationRootLocator(page, scope);
   if (await root.count() !== 1) throw new Error('exact_active_conversation_root_required');
-  await prepareWeComCardPanel(root, cardConfig); await assertActive(scope);
   const title = root.locator('.chat-tool-wrap .card-box__content-title[title="' + cardConfig.title + '"]').filter({ visible: true });
   if (await title.count() !== 1) throw new Error('exact_native_wecom_card_required');
   const cardElement = title.locator('..').locator('..');
@@ -64,6 +62,19 @@ export async function sendConfiguredWeComCard({ page, scope, cardConfig = DEFAUL
   if (await button.count() !== 1 || !(await button.isEnabled())) throw new Error('unique_enabled_card_send_required');
   if(canSend()!==true)throw new Error('outside_reply_hours');
   await button.click({ timeout: 1000 }); await assertActive(scope);
+}
+
+export async function clickPreparedWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true }) {
+  await assertActive(scope);
+  return clickPreparedCardElement({page,scope,cardConfig,assertActive,canSend});
+}
+
+export async function sendConfiguredWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true }) {
+  await assertActive(scope);
+  const root = activeConversationRootLocator(page, scope);
+  if (await root.count() !== 1) throw new Error('exact_active_conversation_root_required');
+  await prepareWeComCardPanel(root, cardConfig); await assertActive(scope);
+  return clickPreparedCardElement({page,scope,cardConfig,assertActive,canSend});
 }
 
 export async function clickConfiguredTextSend({ page, scope, assertActive = async () => {}, canSend = () => true }) {
@@ -281,6 +292,8 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
       if (await input.inputValue() !== '') throw new Error('existing_operator_draft_preserved');
       await input.fill(text, { timeout: 1000 }); pendingText = text; await assertActive(scope); },
     async clickTextSend(scope) { return clickConfiguredTextSend({page,scope,assertActive,canSend}); },
+    async prepareCard(scope) { await assertActive(scope); const root=activeConversationRootLocator(page,scope); if(await root.count()!==1)throw new Error('exact_active_conversation_root_required'); await prepareWeComCardPanel(root,cardConfig); await assertActive(scope); },
+    async clickPreparedCard(scope) { return clickPreparedWeComCard({page,scope,cardConfig,assertActive,canSend}); },
     async sendCard(scope) { return sendConfiguredWeComCard({ page, scope, cardConfig, assertActive, canSend }); },
     async waitForReceipt(intent, { startedAtMs = 0, timeoutMs = 2000 } = {}) { const deadline = Date.now() + timeoutMs;
       while (Date.now() <= deadline) {

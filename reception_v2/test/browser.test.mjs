@@ -102,3 +102,14 @@ test('configured card helper rechecks reply window after panel preparation',asyn
   const {sendConfiguredWeComCard}=await import('../browser.mjs');
   await assert.rejects(()=>sendConfiguredWeComCard({page,scope,assertActive:async()=>{},canSend:()=>false}),/outside_reply_hours/);assert.equal(calls.includes('send'),false);
 });
+
+test('prepared card helper still blocks the final click outside reply hours',async()=>{
+  const calls=[];const button={count:async()=>1,isEnabled:async()=>true,click:async()=>calls.push('send')};
+  const cardLocator={locator(){return this},count:async()=>1,hover:async()=>calls.push('hover'),getByRole:()=>button};
+  const title={filter(){return this},count:async()=>1,locator:()=>cardLocator};
+  const root={count:async()=>1,locator:()=>title};const active={};
+  const page={locator(selector){if(selector.includes('.sx-contact-item.active'))return active;if(selector==='#walle-ad')return{filter:()=>root};throw new Error('unexpected-page:'+selector);}};
+  const {clickPreparedWeComCard}=await import('../browser.mjs');
+  await assert.rejects(()=>clickPreparedWeComCard({page,scope,assertActive:async()=>{},canSend:()=>false}),/outside_reply_hours/);
+  assert.equal(calls.includes('send'),false);
+});

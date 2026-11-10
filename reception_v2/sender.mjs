@@ -151,6 +151,13 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     if (mode.pageVisible === false) throw new Error('page_not_visible');
     if (mode.conversationId && mode.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
     if (!mode.manual || !mode.inputReady) throw new Error('native_manual_mode_required');
+    let cardPrepared=false;
+    if(typeof browser.prepareCard==='function'){
+      try{await browser.prepareCard(scope);cardPrepared=true;}catch(error){
+        if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,'outside_reply_hours');store.markFailed(cardIntentId,'outside_reply_hours');return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}
+      }
+      await assertSafeMode(scope);
+    }
     try { await browser.fillText(scope, textIntent.content); }
     catch (error) {
       if (isPlatformBlock(error)) return { state: 'send_blocked', text: { state: 'send_blocked', intent: store.markFailed(textIntentId, 'platform_blocked') }, card: null };
@@ -169,7 +176,7 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     await assertSafeMode(scope);
     try{assertReplyWindow();}catch(error){if(!isOutsideReplyWindow(error))throw error;store.markUncertain(textIntentId,{error:'reply_window_closed_after_text_submit'});store.markFailed(cardIntentId,'outside_reply_hours');return {state:'outside_reply_hours',text:{state:'uncertain',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}
     const cardStartedAtMs = now(); store.markSending(cardIntentId, cardStartedAtMs);
-    try { await browser.sendCard(scope); }
+    try { if(cardPrepared===true)await browser.clickPreparedCard(scope);else await browser.sendCard(scope); }
     catch (error) {
       store.markUncertain(textIntentId, { error: 'card_send_failed_after_text_submit' });
       if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',text:{state:'uncertain',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.markFailed(cardIntentId,'outside_reply_hours')},withinTwoSeconds:false,withinThreeSeconds:false};

@@ -17,6 +17,8 @@ function fixture(overrides={}) {
     clickTakeover:async()=>{calls.push('takeover');browser.state.manual=true;return {clicked:true}},
     fillText:async(_s,text)=>{calls.push('fill:'+text)},
     clickTextSend:async()=>{calls.push('text');return {observedAtMs:2200}},
+    prepareCard:async()=>{calls.push('prepare-card')},
+    clickPreparedCard:async()=>{calls.push('click-card');return {observedAtMs:2200}},
     sendCard:async()=>{calls.push('card');return {observedAtMs:2200}},
     waitForReceipt:async(intent)=>({serverStatus:'confirmed',accountId,conversationId,content:intent.content,type:intent.kind==='card'?'CARD':'TEXT',cardTitle:intent.kind==='card'?'企微_运去哪海外仓（企微）':null,platformTimeMs:2100,observedAtMs:2200,visibleAtMs:2200,
       senderId:accountId,receiverId:conversationId,direction:'OUTBOUND',nativeId:`id_${accountId}.${conversationId}.${intent.kind}`,...(overrides.receipt||{})}),
@@ -80,7 +82,7 @@ test('text and card receipts are awaited concurrently inside the same 2s window'
   let activeWaits=0,maxWaits=0;
   f.browser.waitForReceipt=async(intent)=>{activeWaits++;maxWaits=Math.max(maxWaits,activeWaits);await new Promise(r=>setTimeout(r,10));activeWaits--;return {serverStatus:'confirmed',accountId,conversationId,content:intent.content,type:intent.kind==='card'?'CARD':'TEXT',cardTitle:intent.kind==='card'?'企微_运去哪海外仓（企微）':null,platformTimeMs:2100,observedAtMs:2200,visibleAtMs:2200,
     senderId:accountId,receiverId:conversationId,direction:'OUTBOUND',nativeId:`id_${accountId}.${conversationId}.${intent.kind}`};};
-  try{const result=await f.sender.sendTextAndCard(textIntent.intentId,cardIntent.intentId,f.scope,1000);assert.equal(maxWaits,2);assert.equal(result.state,'sent');assert.equal(result.withinTwoSeconds,true);assert.deepEqual(f.browser.calls,['fill:你好','text','card']);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+  try{const result=await f.sender.sendTextAndCard(textIntent.intentId,cardIntent.intentId,f.scope,1000);assert.equal(maxWaits,2);assert.equal(result.state,'sent');assert.equal(result.withinTwoSeconds,true);assert.deepEqual(f.browser.calls,['prepare-card','fill:你好','text','click-card']);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
 test('strict card history is verified against the configured card identity',()=>{
@@ -93,7 +95,7 @@ test('strict card history is verified against the configured card identity',()=>
 });
 
 test('card failure after text click never leaves text permanently sending',async()=>{
-  const f=fixture();f.browser.state.manual=true;f.browser.sendCard=async()=>{f.browser.calls.push('card');throw new Error('card_send_dom_changed')};
+  const f=fixture();f.browser.state.manual=true;f.browser.clickPreparedCard=async()=>{f.browser.calls.push('click-card');throw new Error('card_send_dom_changed')};
   const textIntent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
   const cardIntent=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
   try{const result=await f.sender.sendTextAndCard(textIntent.intentId,cardIntent.intentId,f.scope,1000);assert.equal(result.text.state,'uncertain');assert.equal(result.card.state,'uncertain');assert.equal(f.store.getIntent(textIntent.intentId).state,'uncertain');assert.equal(f.store.getIntent(cardIntent.intentId).state,'uncertain');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
@@ -145,7 +147,7 @@ test('DOM-level window close before text click marks text failed, not uncertain'
 });
 
 test('DOM-level window close before pair card click marks card failed and text uncertain',async()=>{
-  const f=fixture();f.browser.state.manual=true;f.browser.sendCard=async()=>{throw new Error('outside_reply_hours')};const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});const card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+  const f=fixture();f.browser.state.manual=true;f.browser.clickPreparedCard=async()=>{throw new Error('outside_reply_hours')};const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});const card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
   try{const result=await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.store.getIntent(text.intentId).state,'uncertain');assert.equal(f.store.getIntent(card.intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
