@@ -149,8 +149,9 @@ export function createOrchestrator(deps) {
 
       const inbound = activeInboundMessages(scope);
       let turn = null;
-      const ingestVisible=()=>{for (const message of activeInboundMessages(scope)) turn = deps.store.ingestInbound({ accountId: scope.accountId, conversationId: scope.conversationId,
-        eventId: message.nativeId, text: message.isEntryHint ? '' : message.text, type: message.isEntryHint ? 'NEW_VISITOR' : 'CUSTOMER_MESSAGE', platformTimeMs: message.platformTimeMs, nickname: scope.nickname });};
+      const observedInboundIds=new Set();
+      const ingestVisible=()=>{let changed=false;for (const message of activeInboundMessages(scope)) {if(!observedInboundIds.has(message.nativeId))changed=true;observedInboundIds.add(message.nativeId);turn = deps.store.ingestInbound({ accountId: scope.accountId, conversationId: scope.conversationId,
+        eventId: message.nativeId, text: message.isEntryHint ? '' : message.text, type: message.isEntryHint ? 'NEW_VISITOR' : 'CUSTOMER_MESSAGE', platformTimeMs: message.platformTimeMs, nickname: scope.nickname });}return changed;};
       ingestVisible();
       if (!turn && row.needsReply === true) {
         const anchor=`sidebar-overdue:${scope.accountId}:${scope.conversationId}:${row.time||''}:${row.preview||''}`;
@@ -160,11 +161,13 @@ export function createOrchestrator(deps) {
             platform_time_source:overduePlatformTimeMs===null?'unknown':'sidebar_time',platform_time_text:row.time||null}});
       }
       if (!turn) return { state: 'no_customer_message' };
-      while (turn && turn.quietUntilMs > clock()) {
-        await sleep(turn.quietUntilMs - clock());
+      let probeAtMs=Math.min(turn?.quietUntilMs ?? 0,clock()+250);
+      while (turn && probeAtMs > clock()) {
+        await sleep(probeAtMs - clock());
         scope = await deps.selectConversation(row.uid);
         if (!scope || scope.conversationId !== row.uid) throw new Error('selected_scope_mismatch');
-        ingestVisible();
+        if(!ingestVisible())break;
+        probeAtMs=Math.min(turn?.quietUntilMs ?? clock(),clock()+250);
       }
       const laterContacts=preExcluded?{handled:null,contacts:[]}:await observeContacts(scope);if(laterContacts.handled)return laterContacts.handled;
       if (!turn) return { state: 'no_turn' };
