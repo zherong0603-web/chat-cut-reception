@@ -39,6 +39,17 @@ test('customer explicitly saying already added becomes an immediate terminal con
   }
   assert.equal(extractContacts(expected,{...scoped,profileFields:[],customerMessages:[{text:'我加了价格',isCustomerText:true}]}).some(value=>value.kind==='wecom_added'),false);
 });
+test('profile reader waits for lazy-loaded contact panel before returning',async()=>{
+  let panelReady=false,profileReads=0;
+  const page={evaluate:async(_fn,input)=>{
+    if(input?.mode==='open-profile')return {opened:1,label:'客资标注'};
+    profileReads++;
+    return panelReady?{...scoped,profileFields:[{label:'名片',value:'企业微信 - 已添加企微',masked:false}],customerMessages:[]}:{...scoped,profileFields:[],customerMessages:[]};
+  },locator:()=>({first:()=>({waitFor:async({state,timeout})=>{assert.equal(state,'visible');assert(timeout>=1000);panelReady=true;}})})};
+  const values=await readContacts(page,{...expected,profileFields:[]});
+  assert.equal(profileReads,1);assert.deepEqual(values.map(x=>x.kind),['wecom_added']);
+});
+
 test('masked field uses only its adjacent eye',async()=>{
   let clickCount=0,openCount=0,reads=0;
   const page={evaluate:async(_fn,input)=>{

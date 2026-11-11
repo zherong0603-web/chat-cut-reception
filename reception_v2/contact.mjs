@@ -52,7 +52,8 @@ async function snapshot(page) {
     const text = el => String(el?.innerText || '').trim();
     const active = Array.from(document.querySelectorAll('.sx-contact-item.active')).filter(rendered);
     const root = active.length === 1 ? active[0].closest('#walle-ad') : null;
-    const headers = root ? Array.from(root.querySelectorAll('.user-id-row .id-group')).filter(rendered) : [];
+    const headers = root ? Array.from(root.querySelectorAll('.user-id-row .id-group')).filter(rendered)
+      .filter(group => Array.from(group.querySelectorAll('.id-label')).some(label => text(label) === 'UID:')) : [];
     return { activeKey: active.length === 1 ? active[0].getAttribute('data-key') : null,
       profileUid: headers.length === 1 ? text(headers[0].querySelector('.ellipsis')) : null,
       profileFields: root ? Array.from(root.querySelectorAll('.information-source-wrap .info-item, .customer-info-wrap .info-item')).filter(rendered).map(item => {
@@ -77,6 +78,29 @@ export async function openCustomerProfile(page, scope) {
     return { opened: 1, label: '客资标注' };
   }, { mode: 'open-profile', conversationId: scope.conversationId });
   if (result.opened !== 1) throw new Error(result.reason || 'contact_profile_open_failed');
+  await waitForProfilePanel(page, scope.conversationId);
+}
+
+async function waitForProfilePanel(page, conversationId, timeoutMs = 2500) {
+  if (typeof page.waitForFunction === 'function') {
+    try {
+      await page.waitForFunction(({ expectedUid }) => {
+        const rendered = el => el?.checkVisibility ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : Boolean(el?.getClientRects?.().length);
+        const text = el => String(el?.innerText || '').trim();
+        const panel = Array.from(document.querySelectorAll('.information-source-wrap, .customer-info-wrap')).some(rendered);
+        const uid = Array.from(document.querySelectorAll('.user-id-row .id-group')).filter(rendered)
+          .find(group => Array.from(group.querySelectorAll('.id-label')).some(label => text(label) === 'UID:'));
+        return panel && Boolean(uid) && text(uid.querySelector('.ellipsis')) === expectedUid;
+      }, { expectedUid: conversationId }, { timeout: timeoutMs });
+      return;
+    } catch {}
+  }
+  if (typeof page.locator === 'function') {
+    try {
+      await page.locator('.information-source-wrap, .customer-info-wrap').first().waitFor({ state: 'visible', timeout: timeoutMs });
+      return;
+    } catch {}
+  }
   if (typeof page.waitForTimeout === 'function') await page.waitForTimeout(120);
   else await new Promise(resolve => setTimeout(resolve, 120));
 }

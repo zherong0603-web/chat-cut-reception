@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { loadAccountConfig } from './account-config.mjs';
 
 const DAY_MS=24*60*60*1000;
+const EVENING_START_MS=18*60*60*1000;
 const SHANGHAI_OFFSET_MS=8*60*60*1000;
 
 export function shanghaiDayRange(date) {
@@ -14,117 +14,81 @@ export function shanghaiDayRange(date) {
   if(!Number.isFinite(startMs)||new Date(startMs+SHANGHAI_OFFSET_MS).toISOString().slice(0,10)!==value)throw new Error('invalid_report_date');
   return {date:value,startMs,endMs:startMs+DAY_MS,startIso:new Date(startMs).toISOString(),endIso:new Date(startMs+DAY_MS).toISOString()};
 }
-
 export function previousShanghaiDate(nowMs=Date.now()) {
-  const shifted=new Date(nowMs+SHANGHAI_OFFSET_MS);
-  shifted.setUTCDate(shifted.getUTCDate()-1);
-  return shifted.toISOString().slice(0,10);
+  const shifted=new Date(nowMs+SHANGHAI_OFFSET_MS);shifted.setUTCDate(shifted.getUTCDate()-1);return shifted.toISOString().slice(0,10);
 }
-
-function number(row,key='n') { return Number(row?.[key]||0); }
 function evidence(value) { try{return JSON.parse(value||'{}');}catch{return {};} }
 function ratio(n,d) { return d>0?n/d:null; }
-function percentile(values,p) {
-  if(!values.length)return null;
-  const sorted=[...values].sort((a,b)=>a-b);
-  return sorted[Math.min(sorted.length-1,Math.max(0,Math.ceil(sorted.length*p)-1))];
-}
-function displayRate(n,d) { return d>0?`${n}/${d}，${(n/d*100).toFixed(1)}%`:`0/0，无有效样本`; }
+function displayRate(n,d) { return d>0?`${n}/${d}，${(n/d*100).toFixed(1)}%`:'0/0，无有效样本'; }
+function unique(items,key='conversation_id'){return new Set(items.map(item=>item[key]).filter(Boolean));}
+function platformTime(row){const value=Number(evidence(row.evidence_json).platformTimeMs);return Number.isFinite(value)?value:null;}
+function earliestAfter(rows,uid,timestamp){let best=null;for(const row of rows){if(row.conversation_id!==uid||row.kind!=='text'||row.state!=='sent')continue;const at=platformTime(row);if(at==null||at<timestamp)continue;if(best==null||at<best)best=at;}return best;}
 
 export function buildDailyReport(db,{accountId,date}) {
   if(!db||!accountId)throw new Error('report_database_and_account_required');
-  const range=shanghaiDayRange(date);
-  const eventWhere='account_id=? AND platform_time_ms>=? AND platform_time_ms<?';
-  const inbound=db.prepare(`SELECT COUNT(*) n,COUNT(DISTINCT conversation_id) customers FROM events WHERE ${eventWhere} AND type='NEW_VISITOR'`).get(accountId,range.startMs,range.endMs);
-  const openings=db.prepare(`SELECT COUNT(*) messages,COUNT(DISTINCT conversation_id) customers FROM events WHERE ${eventWhere} AND type='CUSTOMER_MESSAGE'`).get(accountId,range.startMs,range.endMs);
-  const leads=db.prepare(`SELECT COUNT(DISTINCT conversation_id) customers,
-    COUNT(DISTINCT CASE WHEN kind='lead_submitted' THEN conversation_id END) lead_submitted_customers,
-    COUNT(DISTINCT CASE WHEN kind='wecom_added' THEN conversation_id END) wecom_added_customers
-    FROM contacts WHERE account_id=? AND verified=1 AND observed_at_ms>=? AND observed_at_ms<?`).get(accountId,range.startMs,range.endMs);
-  const rows=db.prepare(`SELECT o.intent_id,o.turn_id,o.kind,o.state,o.evidence_json,o.created_at,o.confirmed_at_ms,t.opened_at_ms
-    FROM outbox o JOIN turns t ON t.turn_id=o.turn_id
-    WHERE o.account_id=? AND o.created_at>=? AND o.created_at<?
-    ORDER BY o.created_at,o.intent_id`).all(accountId,range.startIso,range.endIso);
-  const states={sent:0,uncertain:0,failed:0,prepared:0,other:0};
-  const textLatencies=[];
-  const sentTextTurns=new Set();
-  const sentCardTurns=new Set();
-  const sentTextPlatformByTurn=new Map();
-  const sentCardPlatformByTurn=new Map();
-  for(const row of rows){
-    if(Object.hasOwn(states,row.state))states[row.state]++;else states.other++;
-    if(row.state!=='sent')continue;
-    const payload=evidence(row.evidence_json);
-    const platformTime=Number(payload.platformTimeMs);
-    if(row.kind==='text'){
-      sentTextTurns.add(row.turn_id);
-      if(Number.isFinite(platformTime)){
-        const latency=platformTime-Number(row.opened_at_ms);
-        if(Number.isFinite(latency)&&latency>=0){
-          textLatencies.push(latency);
-          sentTextPlatformByTurn.set(row.turn_id,Math.min(sentTextPlatformByTurn.get(row.turn_id)??Infinity,platformTime));
-        }
-      }
-    }else if(row.kind==='card'&&Number.isFinite(platformTime)){
-      sentCardTurns.add(row.turn_id);
-      sentCardPlatformByTurn.set(row.turn_id,Math.min(sentCardPlatformByTurn.get(row.turn_id)??Infinity,platformTime));
-    }
-  }
-  const openedByTurn=new Map(rows.map(row=>[row.turn_id,Number(row.opened_at_ms)]));
-  const textWithin3s=textLatencies.filter(ms=>ms<=3000).length;
-  const completedPairs=[...sentTextTurns].filter(turnId=>sentCardTurns.has(turnId));
-  const pairWithin3s=completedPairs.filter(turnId=>{
-    const opened=openedByTurn.get(turnId),textAt=sentTextPlatformByTurn.get(turnId),cardAt=sentCardPlatformByTurn.get(turnId);
-    return Number.isFinite(opened)&&Number.isFinite(textAt)&&Number.isFinite(cardAt)&&Math.max(textAt,cardAt)-opened<=3000;
-  }).length;
-  const terminal=states.sent+states.uncertain+states.failed;
+  const day=shanghaiDayRange(date);const startMs=day.startMs+EVENING_START_MS,endMs=day.endMs;
+  const inboundRows=db.prepare("SELECT conversation_id,event_id,platform_time_ms FROM events WHERE account_id=? AND type='NEW_VISITOR' AND platform_time_ms>=? AND platform_time_ms<?").all(accountId,startMs,endMs);
+  const inboundByCustomer=new Map();for(const row of inboundRows)inboundByCustomer.set(row.conversation_id,Math.min(inboundByCustomer.get(row.conversation_id)??Infinity,row.platform_time_ms));
+  const inboundCustomers=unique(inboundRows);
+  const customerMessageRows=db.prepare("SELECT conversation_id,event_id,platform_time_ms FROM events WHERE account_id=? AND type='CUSTOMER_MESSAGE' AND platform_time_ms>=? AND platform_time_ms<?").all(accountId,startMs,endMs);
+  const openedByCustomer=new Map();for(const row of customerMessageRows){if(!inboundCustomers.has(row.conversation_id))continue;openedByCustomer.set(row.conversation_id,Math.min(openedByCustomer.get(row.conversation_id)??Infinity,row.platform_time_ms));}
+  const cardClickRows=db.prepare("SELECT conversation_id,event_id,platform_time_ms FROM events WHERE account_id=? AND type='CARD_CLICK' AND platform_time_ms>=? AND platform_time_ms<?").all(accountId,startMs,endMs);
+  const allContacts=db.prepare('SELECT conversation_id,kind,source,verified FROM contacts WHERE account_id=? AND verified=1').all(accountId).filter(row=>inboundCustomers.has(row.conversation_id));
+  const contactKinds=new Map();for(const row of allContacts){const set=contactKinds.get(row.conversation_id)||new Set();set.add(row.kind);contactKinds.set(row.conversation_id,set);}
+  const actualContacts=allContacts.filter(row=>row.kind==='wecom_added'||row.kind==='phone'||row.kind==='wechat'||(row.kind==='lead_submitted'&&row.source!=='sidebar'));
+  const leadCustomers=unique(actualContacts),wecomCustomers=unique(allContacts.filter(row=>row.kind==='wecom_added')),leadSubmittedCustomers=unique(actualContacts.filter(row=>row.kind==='lead_submitted')),phoneWechatCustomers=unique(actualContacts.filter(row=>row.kind==='phone'||row.kind==='wechat'));
+  const sidebarOnlyCustomers=new Set([...contactKinds].filter(([uid,kinds])=>kinds.has('lead_submitted')&&!leadCustomers.has(uid)).map(([uid])=>uid));
+  const outboxRows=db.prepare(`SELECT o.intent_id,o.conversation_id,o.kind,o.state,o.evidence_json,o.created_at
+    FROM outbox o WHERE o.account_id=? AND o.created_at<? ORDER BY o.created_at,o.intent_id`).all(accountId,day.endIso).filter(row=>inboundCustomers.has(row.conversation_id));
+  const states={sent:0,uncertain:0,failed:0,prepared:0,other:0};for(const row of outboxRows){if(Object.hasOwn(states,row.state))states[row.state]++;else states.other++;}
+  const repliedAfterOpen=[],within3sAfterOpen=[],initialReplied=[],within3sInitial=[];const repliedTimes=[],initialTimes=[];
+  for(const [uid,newAt] of inboundByCustomer){const initialAt=earliestAfter(outboxRows,uid,newAt);if(initialAt!=null){initialReplied.push(uid);initialTimes.push(initialAt-newAt);if(initialAt-newAt<=3000)within3sInitial.push(uid);}const openedAt=openedByCustomer.get(uid);if(openedAt==null)continue;const replyAt=earliestAfter(outboxRows,uid,openedAt);if(replyAt!=null){repliedAfterOpen.push(uid);repliedTimes.push(replyAt-openedAt);if(replyAt-openedAt<=3000)within3sAfterOpen.push(uid);}}
+  const uncertainCustomers=unique(outboxRows.filter(row=>row.state==='uncertain')),failedCustomers=unique(outboxRows.filter(row=>row.state==='failed')),confirmedCardCustomers=unique(outboxRows.filter(row=>row.kind==='card'&&row.state==='sent'));
+  const cohortOpenedRows=customerMessageRows.filter(row=>inboundCustomers.has(row.conversation_id));
   return {
-    report_date:range.date,timezone:'Asia/Shanghai',window_start_utc:range.startIso,window_end_utc:range.endIso,
-    inbound:{events:number(inbound),customers:number(inbound,'customers')},
-    openings:{customers:number(openings,'customers'),messages:number(openings,'messages')},
-    leads:{customers:number(leads,'customers'),lead_submitted_customers:number(leads,'lead_submitted_customers'),wecom_added_customers:number(leads,'wecom_added_customers')},
-    replies:{
-      attempted:rows.length,states,sent:states.sent,uncertain:states.uncertain,failed:states.failed,
-      confirmed_rate:ratio(states.sent,terminal),
-      text_sent:textLatencies.length,text_within_3s:textWithin3s,text_within_3s_rate:ratio(textWithin3s,textLatencies.length),
-      median_text_platform_ms:percentile(textLatencies,.5),p95_text_platform_ms:percentile(textLatencies,.95),
-      pair_turns:sentTextTurns.size,pair_completed:completedPairs.length,pair_within_3s:pairWithin3s,pair_within_3s_rate:ratio(pairWithin3s,completedPairs.length),
-    },
+    report_date:day.date,timezone:'Asia/Shanghai',window_local:'18:00:00-23:59:59',window_start_utc:new Date(startMs).toISOString(),window_end_utc:new Date(endMs).toISOString(),
+    inbound:{events:inboundRows.length,customers:inboundCustomers.size},
+    openings:{customers:cohortOpenedRows.filter(row=>openedByCustomer.has(row.conversation_id)).reduce((set,row)=>set.add(row.conversation_id),new Set()).size,messages:cohortOpenedRows.length,all_window_customers:unique(customerMessageRows).size},
+    leads:{customers:leadCustomers.size,wecom_added_customers:wecomCustomers.size,lead_submitted_customers:leadSubmittedCustomers.size,phone_or_wechat_customers:phoneWechatCustomers.size,sidebar_tag_only_customers:sidebarOnlyCustomers.size},
+    card_clicks:{customers:unique(cardClickRows.filter(row=>inboundCustomers.has(row.conversation_id))).size,events:cardClickRows.filter(row=>inboundCustomers.has(row.conversation_id)).length},
+    replies:{outbox_items:outboxRows.length,states,sent_customers:unique(outboxRows.filter(row=>row.state==='sent')).size,sent:states.sent,uncertain:states.uncertain,failed:states.failed,
+      confirmed_after_open_customers:repliedAfterOpen.length,within_3s_after_open_customers:within3sAfterOpen.length,within_3s_after_open_rate:ratio(within3sAfterOpen.length,repliedAfterOpen.length),median_after_open_ms:repliedTimes.length?[...repliedTimes].sort((a,b)=>a-b)[Math.ceil(repliedTimes.length*.5)-1]:null,
+      confirmed_initial_customers:initialReplied.length,within_3s_initial_customers:within3sInitial.length,within_3s_initial_rate:ratio(within3sInitial.length,initialReplied.length),median_initial_ms:initialTimes.length?[...initialTimes].sort((a,b)=>a-b)[Math.ceil(initialTimes.length*.5)-1]:null,
+      uncertain_customers:uncertainCustomers.size,failed_customers:failedCustomers.size,confirmed_card_customers:confirmedCardCustomers.size},
   };
 }
 
 export function renderDailyReport(report) {
-  const r=report.replies;
-  const confirmedRate=r.confirmed_rate==null?'无有效样本':`${(r.confirmed_rate*100).toFixed(1)}%`;
-  const median=r.median_text_platform_ms==null?'无':`${r.median_text_platform_ms} ms`;
-  const p95=r.p95_text_platform_ms==null?'无':`${r.p95_text_platform_ms} ms`;
+  const r=report.replies;const openingRate=r.confirmed_after_open_customers>0?`${(r.confirmed_after_open_customers/report.openings.customers*100).toFixed(1)}%`:'无有效样本';
   return [
-    `# 小红书接待日报｜${report.report_date}`,
+    `# 小红书晚间接待日报｜${report.report_date}`,
     '',
-    `统计时区：${report.timezone}；完整窗口：当日 00:00 至次日 00:00。`,
+    `统计窗口：北京时间 ${report.window_local}。所有漏斗指标只统计该时段新进线客户。`,
     '',
-    `- 总进线：${report.inbound.events} 次，${report.inbound.customers} 位客户`,
-    `- 开口：${report.openings.customers} 位客户，${report.openings.messages} 条真实客户消息`,
-    `- 留资：${report.leads.customers} 位客户；留资卡 ${report.leads.lead_submitted_customers} 位；已加企微 ${report.leads.wecom_added_customers} 位`,
-    `- 3 秒内文字回复：${displayRate(r.text_within_3s,r.text_sent)}`,
-    `- 文字平台提交耗时：中位数 ${median}；P95 ${p95}`,
-    `- 文字与企微卡同时 3 秒内：${displayRate(r.pair_within_3s,r.pair_completed)}`,
-    `- 发送闭环率：${displayRate(r.sent,r.sent+r.uncertain+r.failed)}；确认率 ${confirmedRate}`,
-    `- 发送状态：已确认 ${r.sent}，待核实 ${r.uncertain}，失败 ${r.failed}`,
+    `- 晚间进线：${report.inbound.events} 次，${report.inbound.customers} 位客户`,
+    `- 开口：${report.openings.customers}/${report.inbound.customers} 位进线客户，${report.openings.messages} 条真实客户消息`,
+    `- 其他窗口内开口但非本批新进线：${Math.max(0,report.openings.all_window_customers-report.openings.customers)} 位，未计入本次漏斗`,
+    `- 有效留资：${report.leads.customers} 位客户`,
+    `- 已添加企微：${report.leads.wecom_added_customers} 位客户`,
+    `- 已验证手机或微信：${report.leads.phone_or_wechat_customers} 位客户`,
+    `- 已提交留资卡：${report.leads.lead_submitted_customers} 位客户`,
+    `- 仅有侧栏留资标签但资料未核实：${report.leads.sidebar_tag_only_customers} 位客户`,
+    `- 企微卡点击：${report.card_clicks.customers} 位客户`,
     '',
-    '口径：进线按 NEW_VISITOR 事件；开口按当天出现 CUSTOMER_MESSAGE 的去重客户；留资按当天 verified 联系人去重；3 秒率只统计已确认文字，并用平台提交时间减本轮首条客户消息时间计算。',
+    `- 开口客户已确认回复：${r.confirmed_after_open_customers}/${report.openings.customers}，${openingRate}`,
+    `- 开口后 3 秒内回复：${displayRate(r.within_3s_after_open_customers,r.confirmed_after_open_customers)}`,
+    `- 开口后回复耗时中位数：${r.median_after_open_ms==null?'无有效样本':`${r.median_after_open_ms} ms`}`,
+    `- 进线后 3 秒内首条回复：${displayRate(r.within_3s_initial_customers,r.confirmed_initial_customers)}`,
+    `- 进线后首条回复耗时中位数：${r.median_initial_ms==null?'无有效样本':`${r.median_initial_ms} ms`}`,
+    `- 待核实客户：${r.uncertain_customers} 位；失败客户：${r.failed_customers} 位`,
+    `- 已确认文字：${r.sent} 条；待核实发送：${r.uncertain} 条；失败发送：${r.failed} 条`,
+    '',
+    '口径：进线使用 NEW_VISITOR；开口只计算本批晚间进线 UID 在窗口内的 CUSTOMER_MESSAGE；留资以客户资料中已验证的已加企微、手机、微信或真实提交留资卡为准，仅有侧栏“留客资/留资客”标签不冒充有效留资。3 秒率按平台提交时间减首次客户开口或首次进线时间计算。',
   ].join('\n');
 }
 
 function argValue(args,flag,fallback=null){const i=args.indexOf(flag);return i>=0&&args[i+1]?args[i+1]:fallback;}
 if(import.meta.url===new URL(process.argv[1],'file:').href){
-  const args=process.argv.slice(2);
-  const account=loadAccountConfig({cwd:process.cwd(),env:process.env});
-  const dbPath=path.resolve(argValue(args,'--db',path.join(account.runtimeDir,'reception-v2.sqlite3')));
-  const date=argValue(args,'--date',previousShanghaiDate());
-  const db=new DatabaseSync(dbPath,{readOnly:true});
-  try{
-    const report=buildDailyReport(db,{accountId:account.accountId,date});
-    console.log(args.includes('--json')?JSON.stringify(report,null,2):renderDailyReport(report));
-  }finally{db.close();}
+  const args=process.argv.slice(2);const account=loadAccountConfig({cwd:process.cwd(),env:process.env});const dbPath=path.resolve(argValue(args,'--db',path.join(account.runtimeDir,'reception-v2.sqlite3')));const date=argValue(args,'--date',previousShanghaiDate());const db=new DatabaseSync(dbPath,{readOnly:true});
+  try{const report=buildDailyReport(db,{accountId:account.accountId,date});console.log(args.includes('--json')?JSON.stringify(report,null,2):renderDailyReport(report));}finally{db.close();}
 }
