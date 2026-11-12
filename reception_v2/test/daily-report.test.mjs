@@ -9,6 +9,7 @@ function fixture() {
     CREATE TABLE events(account_id TEXT,conversation_id TEXT,event_id TEXT,type TEXT,platform_time_ms INTEGER,detected_at_ms INTEGER,evidence_json TEXT);
     CREATE TABLE turns(turn_id TEXT PRIMARY KEY,account_id TEXT,conversation_id TEXT,opened_at_ms INTEGER);
     CREATE TABLE outbox(intent_id TEXT PRIMARY KEY,turn_id TEXT,account_id TEXT,conversation_id TEXT,kind TEXT,state TEXT,evidence_json TEXT,created_at TEXT,confirmed_at_ms INTEGER);
+    CREATE TABLE turn_inbound_events(turn_id TEXT,event_id TEXT);
     CREATE TABLE contacts(account_id TEXT,conversation_id TEXT,kind TEXT,source TEXT,verified INTEGER,observed_at_ms INTEGER);
   `);
   const {startMs,endMs}=shanghaiDayRange('2026-11-10');
@@ -28,6 +29,7 @@ function fixture() {
   insertEvent.run(account,old,'old-open','CUSTOMER_MESSAGE',evening+30_000,evening+30_100,'{}');
   insertTurn.run('t1',account,c1,evening+12_000);
   insertTurn.run('t2',account,c2,evening+22_000);
+  db.exec("INSERT INTO turn_inbound_events VALUES ('t1','m1'),('t2','m2')");
   const iso=ms=>new Date(ms).toISOString();
   insertOutbox.run('o1','t1',account,c1,'text','sent',JSON.stringify({verified:true,platformTimeMs:evening+14_000}),iso(evening+14_100),evening+14_100);
   insertOutbox.run('o2','t2',account,c2,'text','sent',JSON.stringify({verified:true,platformTimeMs:evening+24_000}),iso(evening+24_100),evening+24_100);
@@ -67,4 +69,14 @@ test('evening report uses new-visitor cohort and verified profile lead state',()
     assert.match(markdown,/开口后 3 秒内回复：2\/2，100\.0%/);
     assert.match(markdown,/进线后 3 秒内首条回复：0\/2，0\.0%/);
   }finally{db.close();}
+});
+
+test('a later unrelated text cannot satisfy the first customer opening',()=>{
+  const {db}=fixture();
+  try {
+    db.exec("DELETE FROM turn_inbound_events WHERE turn_id='t1'");
+    const report=buildDailyReport(db,{accountId:'a'.repeat(24),date:'2026-11-10'});
+    assert.equal(report.replies.confirmed_after_open_customers,1);
+    assert.equal(report.replies.within_3s_after_open_rate,0.5);
+  } finally {db.close();}
 });
