@@ -5,6 +5,8 @@ import { loadAccountConfig } from './account-config.mjs';
 
 const DAY_MS=24*60*60*1000;
 const EVENING_START_MS=18*60*60*1000;
+// Historical outbox rows lack a purpose field. Match the exact orchestrator acknowledgment.
+const CARD_CLICK_ACK_TEXT='看到您点击企微卡了，客服小姐姐会在企微里回复您，请留意消息～';
 const SHANGHAI_OFFSET_MS=8*60*60*1000;
 
 export function shanghaiDayRange(date) {
@@ -22,7 +24,7 @@ function ratio(n,d) { return d>0?n/d:null; }
 function displayRate(n,d) { return d>0?`${n}/${d}，${(n/d*100).toFixed(1)}%`:'0/0，无有效样本'; }
 function unique(items,key='conversation_id'){return new Set(items.map(item=>item[key]).filter(Boolean));}
 function platformTime(row){const receipt=evidence(row.evidence_json);return receipt?.verified===true&&Number.isFinite(receipt.platformTimeMs)?receipt.platformTimeMs:null;}
-function earliestAfter(rows,uid,timestamp,endMs,turnIds=null){let best=null;for(const row of rows){if(row.conversation_id!==uid||row.kind!=='text'||row.state!=='sent'||(turnIds&&!turnIds.has(row.turn_id)))continue;const at=platformTime(row);if(at==null||at<timestamp||at>=endMs)continue;if(best==null||at<best)best=at;}return best;}
+function earliestAfter(rows,uid,timestamp,endMs,turnIds=null){let best=null;for(const row of rows){if(row.conversation_id!==uid||row.kind!=='text'||row.content===CARD_CLICK_ACK_TEXT||row.state!=='sent'||(turnIds&&!turnIds.has(row.turn_id)))continue;const at=platformTime(row);if(at==null||at<timestamp||at>=endMs)continue;if(best==null||at<best)best=at;}return best;}
 
 export function buildDailyReport(db,{accountId,date}) {
   if(!db||!accountId)throw new Error('report_database_and_account_required');
@@ -43,7 +45,7 @@ export function buildDailyReport(db,{accountId,date}) {
   const actualContacts=allContacts.filter(row=>row.kind==='wecom_added'||row.kind==='phone'||row.kind==='wechat'||(row.kind==='lead_submitted'&&row.source!=='sidebar'));
   const leadCustomers=unique(actualContacts),wecomCustomers=unique(allContacts.filter(row=>row.kind==='wecom_added')),leadSubmittedCustomers=unique(actualContacts.filter(row=>row.kind==='lead_submitted')),phoneWechatCustomers=unique(actualContacts.filter(row=>row.kind==='phone'||row.kind==='wechat'));
   const sidebarOnlyCustomers=new Set([...contactKinds].filter(([uid,kinds])=>kinds.has('lead_submitted')&&!leadCustomers.has(uid)).map(([uid])=>uid));
-  const outboxRows=db.prepare(`SELECT o.intent_id,o.turn_id,o.conversation_id,o.kind,o.state,o.evidence_json,o.created_at
+  const outboxRows=db.prepare(`SELECT o.intent_id,o.turn_id,o.conversation_id,o.kind,o.state,o.content,o.evidence_json,o.created_at
     FROM outbox o WHERE o.account_id=? AND o.created_at>=? AND o.created_at<? ORDER BY o.created_at,o.intent_id`).all(accountId,new Date(startMs).toISOString(),day.endIso).filter(row=>inboundCustomers.has(row.conversation_id));
   const states={sent:0,uncertain:0,failed:0,prepared:0,other:0};for(const row of outboxRows){if(Object.hasOwn(states,row.state))states[row.state]++;else states.other++;}
   const repliedAfterOpen=[],within3sAfterOpen=[],initialReplied=[],within3sInitial=[];const repliedTimes=[],initialTimes=[];
@@ -87,7 +89,7 @@ export function renderDailyReport(report) {
     `- 待核实客户：${r.uncertain_customers} 位；失败客户：${r.failed_customers} 位`,
     `- 已确认发送（含名片）：${r.sent} 条；待核实发送：${r.uncertain} 条；失败发送：${r.failed} 条`,
     '',
-    '口径：进线使用 NEW_VISITOR；开口只计算本批晚间进线 UID 在窗口内的 CUSTOMER_MESSAGE；留资以客户资料中已验证的已加企微、手机、微信或真实提交留资卡为准，仅有侧栏“留客资/留资客”标签不冒充有效留资。开口回复只统计与首条客户消息绑定的接待轮次。3 秒率以全体开口或进线客户为分母，耗时使用平台消息时间，中位数只统计已确认回复。企微添加为资料观察结果，未必发生在该统计窗口。',
+    '口径：进线使用 NEW_VISITOR；开口只计算本批晚间进线 UID 在窗口内的 CUSTOMER_MESSAGE；留资以客户资料中已验证的已加企微、手机、微信或真实提交留资卡为准，仅有侧栏“留客资/留资客”标签不冒充有效留资。开口回复只统计与首条客户消息绑定的接待轮次。企微卡点击提示不计入两项回复时效。3 秒率以全体开口或进线客户为分母，耗时使用平台消息时间，中位数只统计已确认回复。企微添加为资料观察结果，未必发生在该统计窗口。',
   ].join('\n');
 }
 
