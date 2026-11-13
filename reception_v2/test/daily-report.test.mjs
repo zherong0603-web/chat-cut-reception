@@ -91,3 +91,13 @@ test('a confirmed click acknowledgment never counts as a reply even in the openi
     assert.equal(report.replies.sent,2);
   } finally {db.close();}
 });
+
+test('median averages the two middle reply latencies',()=>{
+  const {db,evening}=fixture();
+  try {
+    db.prepare("UPDATE outbox SET evidence_json=? WHERE intent_id='o2'").run(JSON.stringify({verified:true,platformTimeMs:evening+26_000}));
+    const report=buildDailyReport(db,{accountId:'a'.repeat(24),date:'2026-11-10'});
+    assert.equal(report.replies.median_after_open_ms,3000);
+    assert.equal(report.replies.median_initial_ms,5000);
+  } finally {db.close();}
+});

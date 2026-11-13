@@ -20,6 +20,11 @@ export function previousShanghaiDate(nowMs=Date.now()) {
   const shifted=new Date(nowMs+SHANGHAI_OFFSET_MS);shifted.setUTCDate(shifted.getUTCDate()-1);return shifted.toISOString().slice(0,10);
 }
 function evidence(value) { try{return JSON.parse(value||'{}');}catch{return {};} }
+function median(values) {
+  if(!values.length)return null;
+  const sorted=[...values].sort((a,b)=>a-b);
+  return (sorted[Math.floor((sorted.length-1)/2)]+sorted[Math.floor(sorted.length/2)])/2;
+}
 function ratio(n,d) { return d>0?n/d:null; }
 function displayRate(n,d) { return d>0?`${n}/${d}，${(n/d*100).toFixed(1)}%`:'0/0，无有效样本'; }
 function unique(items,key='conversation_id'){return new Set(items.map(item=>item[key]).filter(Boolean));}
@@ -58,8 +63,8 @@ export function buildDailyReport(db,{accountId,date}) {
     leads:{customers:leadCustomers.size,wecom_added_customers:wecomCustomers.size,lead_submitted_customers:leadSubmittedCustomers.size,phone_or_wechat_customers:phoneWechatCustomers.size,sidebar_tag_only_customers:sidebarOnlyCustomers.size},
     card_clicks:{customers:unique(cardClickRows.filter(row=>inboundCustomers.has(row.conversation_id))).size,events:cardClickRows.filter(row=>inboundCustomers.has(row.conversation_id)).length},
     replies:{outbox_items:outboxRows.length,states,sent_customers:unique(outboxRows.filter(row=>row.state==='sent')).size,sent:states.sent,uncertain:states.uncertain,failed:states.failed,
-      confirmed_after_open_customers:repliedAfterOpen.length,within_3s_after_open_customers:within3sAfterOpen.length,within_3s_after_open_rate:ratio(within3sAfterOpen.length,openedByCustomer.size),median_after_open_ms:repliedTimes.length?[...repliedTimes].sort((a,b)=>a-b)[Math.ceil(repliedTimes.length*.5)-1]:null,
-      confirmed_initial_customers:initialReplied.length,within_3s_initial_customers:within3sInitial.length,within_3s_initial_rate:ratio(within3sInitial.length,inboundCustomers.size),median_initial_ms:initialTimes.length?[...initialTimes].sort((a,b)=>a-b)[Math.ceil(initialTimes.length*.5)-1]:null,
+      confirmed_after_open_customers:repliedAfterOpen.length,within_3s_after_open_customers:within3sAfterOpen.length,within_3s_after_open_rate:ratio(within3sAfterOpen.length,openedByCustomer.size),median_after_open_ms:median(repliedTimes),
+      confirmed_initial_customers:initialReplied.length,within_3s_initial_customers:within3sInitial.length,within_3s_initial_rate:ratio(within3sInitial.length,inboundCustomers.size),median_initial_ms:median(initialTimes),
       uncertain_customers:uncertainCustomers.size,failed_customers:failedCustomers.size,confirmed_card_customers:confirmedCardCustomers.size},
   };
 }
