@@ -7,8 +7,19 @@ const LOCK='reception-v2.lock', HEALTH='reception-v2-health.json';
 export const POLL_INTERVAL_MS=250;
 function isNavigationRecoveryError(error){const text=String(error?.message||error||'');return /unexpected_sidebar_route|account_title_not_ready|account_title_mismatch/i.test(text);}
 function isFatalBrowserError(error){const text=String(error?.message||error||'');return /Target crashed|Target page, context or browser has been closed|context or browser has been closed|browser has been closed|page has been closed|page_evaluate: Target closed/i.test(text);}
-function atomicJson(file,value){fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});const temp=file+'.'+process.pid+'.tmp';
-  fs.writeFileSync(temp,JSON.stringify(value,null,2)+'\n',{encoding:'utf8',mode:0o600,flag:'wx'});try{fs.renameSync(temp,file);}finally{if(fs.existsSync(temp))fs.unlinkSync(temp);}fs.chmodSync(file,0o600);}
+function atomicJson(file,value){
+  fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});
+  const serialized=JSON.stringify(value,null,2)+'\n';
+  const temp=file+'.'+process.pid+'.'+crypto.randomUUID()+'.tmp';
+  const fd=fs.openSync(temp,'wx',0o600);
+  try {
+    try { fs.writeFileSync(fd,serialized,'utf8'); } finally { fs.closeSync(fd); }
+    fs.renameSync(temp,file);
+  } catch (error) {
+    try { fs.unlinkSync(temp); } catch {}
+    throw error;
+  }
+}
 function pidAlive(pid){if(!Number.isSafeInteger(pid)||pid<=0)return false;try{process.kill(pid,0);return true;}catch{return false;}}
 export function processStartIdentity(pid=process.pid){const result=spawnSync('/bin/ps',['-p',String(pid),'-o','lstart='],{encoding:'utf8'});if(result.status!==0)return null;return String(result.stdout||'').trim()||null;}
 

@@ -108,3 +108,21 @@ test('route drift reopens the inbox without relaunching the whole browser',async
   const r=createRuntime({runtimeDir:dir,accountId:'a',armed:true,deps});
   try{await r.start();await r.tick();const health=readHealth(dir);assert.equal(launches,1);assert.equal(navigationRecoveries,1);assert.equal(polls,2);assert.equal(health.error,null);assert(health.last_successful_sidebar_read_at);}finally{await r.stop();fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('a stale health temp file cannot block the next publication',async()=>{
+  const dir=root();
+  const stale=path.join(dir,`reception-v2-health.json.${process.pid}.tmp`);
+  fs.writeFileSync(stale,'stale',{mode:0o600});
+  const r=createRuntime({runtimeDir:dir,accountId:'a',armed:false,deps:{
+    launchBrowser:async()=>({}),closeBrowser:async()=>{},readSidebar:async()=>({rows:[]}),
+  }});
+  try {
+    await r.start();
+    await r.tick();
+    assert.ok(readHealth(dir).last_successful_sidebar_read_at);
+    assert.equal(fs.readFileSync(stale,'utf8'),'stale');
+    assert.equal(fs.statSync(path.join(dir,'reception-v2-health.json')).mode&0o777,0o600);
+  } finally {
+    try { await r.stop(); } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+  }
+});
