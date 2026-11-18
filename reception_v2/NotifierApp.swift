@@ -78,72 +78,61 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makePanel(card: [String: Any]) -> CardPanel {
-        let size = NSSize(width: 460, height: 520)
+        let size = NSSize(width: 480, height: 570)
         let panel = CardPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .floating
-        panel.isOpaque = false
-        panel.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 0.97)
+        panel.isOpaque = true
+        panel.backgroundColor = .white
         panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.becomesKeyOnlyIfNeeded = true
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         panel.setFrameOrigin(NSPoint(x: screen.maxX - size.width - 24, y: screen.maxY - size.height - 24))
-
         let content = NSView(frame: NSRect(origin: .zero, size: size))
         panel.contentView = content
         let kind = card["kind"] as? String ?? "needs_operator"
         let title = NSTextField(labelWithString: labels[kind] ?? "需要你处理")
-        title.font = .boldSystemFont(ofSize: 22)
-        title.textColor = kind == "ready_to_follow" ? .systemGreen : (kind == "send_failed" ? .systemRed : .systemOrange)
-        title.frame = NSRect(x: 24, y: 470, width: 412, height: 32)
+        title.font = .boldSystemFont(ofSize: 20)
+        title.textColor = NSColor(calibratedRed: 0.08, green: 0.38, blue: 0.31, alpha: 1)
+        title.frame = NSRect(x: 24, y: 520, width: 432, height: 28)
         content.addSubview(title)
-
+        let scroll = NSScrollView(frame: NSRect(x: 24, y: 64, width: 432, height: 440))
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
         let fields = card["fields"] as? [String: String] ?? [:]
-        let order = ["客户", "想了解", "联系方式", "我已完成", "下一步"]
-        for (index, key) in order.enumerated() {
-            let value = fields[key] ?? ""
-            let row = NSTextField(wrappingLabelWithString: "\(key)：\(value)")
-            row.font = .systemFont(ofSize: index == 2 ? 15 : 14, weight: index == 2 ? .semibold : .regular)
-            row.textColor = .white
-            row.frame = NSRect(x: 24, y: CGFloat(430 - index * 64), width: 412, height: 54)
-            content.addSubview(row)
-        }
-
+        let timeline = card["timeline"] as? [String: String] ?? [:]
         let details = card["details"] as? [String: Any] ?? [:]
-        let rawCustomer = (details["customerText"] as? String) ?? (details["customer_text"] as? String) ?? "暂无额外内容"
-        let detailText = "客户原话：\(rawCustomer)"
-        let detailView = NSTextField(wrappingLabelWithString: detailText)
-        detailView.font = .systemFont(ofSize: 12)
-        detailView.textColor = NSColor(calibratedWhite: 0.82, alpha: 1)
-        detailView.frame = NSRect(x: 24, y: 72, width: 412, height: 88)
-        detailView.isHidden = true
-        detailView.identifier = NSUserInterfaceItemIdentifier("details-body")
-        detailView.toolTip = details.isEmpty ? nil : String(describing: details)
-        content.addSubview(detailView)
-        let detailButton = NSButton(title: "查看客户原话", target: nil, action: nil)
-        detailButton.bezelStyle = .inline
-        detailButton.frame = NSRect(x: 24, y: 24, width: 128, height: 28)
-        detailButton.target = self
-        detailButton.action = #selector(toggleDetails(_:))
-        detailButton.identifier = NSUserInterfaceItemIdentifier(card["noticeId"] as? String ?? "")
-        content.addSubview(detailButton)
-
+        let quote = timeline["customerText"] ?? details["customerText"] as? String ?? details["customer_text"] as? String ?? "原话未记录"
+        let text = [
+            "客户  " + (fields["客户"] ?? ""),
+            "最近开口  " + (timeline["openedAt"] ?? "时间未记录"),
+            "客户说\n" + quote,
+            "已完成\n" + (fields["我已完成"] ?? "操作未记录"),
+            "我方发送记录\n" + (timeline["sentMessages"] ?? "旧通知没有保存发送明细"),
+            "联系方式\n" + (fields["联系方式"] ?? "未获得"),
+            "下一步\n" + (fields["下一步"] ?? "")
+        ].joined(separator: "\n\n")
+        let body = NSTextView(frame: NSRect(x: 0, y: 0, width: 414, height: 440))
+        body.isEditable = false
+        body.isSelectable = true
+        body.drawsBackground = false
+        body.textColor = NSColor(calibratedWhite: 0.16, alpha: 1)
+        body.font = .systemFont(ofSize: 14)
+        body.textContainerInset = NSSize(width: 0, height: 8)
+        body.isVerticallyResizable = true
+        body.isHorizontallyResizable = false
+        body.textContainer?.widthTracksTextView = true
+        body.string = text
+        scroll.documentView = body
+        content.addSubview(scroll)
         let ack = NSButton(title: "知道了", target: nil, action: nil)
         ack.bezelStyle = .rounded
-        ack.frame = NSRect(x: 324, y: 20, width: 112, height: 32)
+        ack.frame = NSRect(x: 344, y: 20, width: 112, height: 32)
         ack.target = self
         ack.action = #selector(acknowledge(_:))
         ack.identifier = NSUserInterfaceItemIdentifier(card["noticeId"] as? String ?? "")
         content.addSubview(ack)
         return panel
-    }
-
-    @objc private func toggleDetails(_ sender: NSButton) {
-        guard let content = panel?.contentView else { return }
-        if let field = content.subviews.compactMap({ $0 as? NSTextField }).first(where: { $0.identifier?.rawValue == "details-body" }) {
-            field.isHidden.toggle()
-            sender.title = field.isHidden ? "查看客户原话" : "收起详情"
-        }
     }
 
     @objc private func acknowledge(_ sender: NSButton) {

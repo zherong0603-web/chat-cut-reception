@@ -82,7 +82,7 @@ if(command==='login'){
   const armed=args.includes('--arm');const profileDir=path.join(runtime,'isolated-browser-profile');const dbPath=path.join(runtime,'reception-v2.sqlite3');
   assertLegacyReceptionStopped();
   let lockRelease=null,store=null;try{lockRelease=acquireRuntimeLock(runtime);store=openDatabase(dbPath);importLegacyUnknowns(store,path.join(runtime,'reception.sqlite3'));}catch(error){lockRelease?.();throw error;}
-  const notifier=createNotifierStore(runtime);const lifecycle={stopping:false};let browser=null;
+  const notifier=createNotifierStore(runtime,{db:store.db});const lifecycle={stopping:false};let browser=null;
   const closeBrowserTransport=async()=>{if(browser){const current=browser;browser=null;await current.close();}};
   const deps={launchBrowser:async()=>{browser=await openBrowser({profileDir,headless:true,accountId:ACCOUNT_ID,accountName:ACCOUNT_NAME,card:account.card,replySchedule});return browser;},
     closeBrowser:async()=>{await closeBrowserTransport();store.close();},closeBrowserTransport,recoverBrowserNavigation:async()=>browser?.recoverNavigation?.(),

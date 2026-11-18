@@ -31,7 +31,24 @@ export function safeLogProjection(card) {
   return JSON.stringify({ noticeId: card.noticeId, kind: card.kind, customer: card.fields?.['客户'], contact_state: card.fields?.['联系方式'] ? 'present' : 'none' });
 }
 
-export function createNotifierStore(runtimeDir) {
+function localTime(ms) {
+  if(!Number.isFinite(ms))return '时间未记录';
+  return new Date(ms+8*3600_000).toISOString().replace('T',' ').slice(0,19)+'（北京时间）';
+}
+export function buildReceptionTimeline(db, accountId, uid) {
+  const opening=db.prepare("SELECT e.platform_time_ms,i.text FROM events e LEFT JOIN turn_inbound_events i ON i.event_id=e.event_id WHERE e.account_id=? AND e.conversation_id=? AND e.type='CUSTOMER_MESSAGE' ORDER BY e.platform_time_ms DESC,e.event_id DESC LIMIT 1").all(accountId,uid)[0];
+  const rows=db.prepare("SELECT kind,state,content,evidence_json FROM outbox WHERE account_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 10").all(accountId,uid).reverse();
+  const sentMessages=rows.map(row=>{
+    let receipt={};try{receipt=JSON.parse(row.evidence_json||'{}');}catch{}
+    const confirmed=row.state==='sent'&&receipt.verified===true;
+    const state=confirmed?'平台已确认':row.state==='prepared'?'尚未提交':row.state==='failed'?'发送失败':'尚不能确认发出';
+    const body=row.kind==='card'?'企业微信名片':bounded(row.content,1200);
+    return (confirmed?localTime(receipt.platformTimeMs)+' ':'')+state+'：'+body;
+  }).join('\n');
+  return {customerText:opening?.text?bounded(opening.text,1200):'尚未记录客户文字原话',openedAt:opening?localTime(opening.platform_time_ms):'尚未记录客户文字开口',sentMessages:sentMessages||'本程序没有发送记录'};
+}
+
+export function createNotifierStore(runtimeDir, { db = null } = {}) {
   const file = path.join(runtimeDir, queueName);
   const hiddenFile = path.join(runtimeDir, hiddenName);
   const ackRequestFile = path.join(runtimeDir, ackRequestName);
@@ -39,7 +56,7 @@ export function createNotifierStore(runtimeDir) {
   function serialize(operation) { const next = mutationTail.then(operation, operation); mutationTail = next.then(() => undefined, () => undefined); return next; }
   async function read() {
     if (!fs.existsSync(file)) return [];
-    try { const value = JSON.parse(fs.readFileSync(file, 'utf8')); return Array.isArray(value) ? value : []; }
+    try { const value = JSON.parse(fs.readFileSync(file, 'utf8')); return Array.isArray(value) ? value.map(card=>{try{return db?{...card,timeline:buildReceptionTimeline(db,card.accountId,card.conversationId)}:card;}catch{return card;}}) : []; }
     catch { return []; }
   }
   async function write(cards) { atomicJson(file, cards.slice(-100)); }
@@ -60,7 +77,8 @@ export function createNotifierStore(runtimeDir) {
   function flushAcknowledgements() { return serialize(flushAcknowledgementsInner); }
   function cardFor(input) {
     const dedupeKey = [input.kind, input.accountId, input.conversationId, input.contact].join('\0');
-    return {dedupeKey, noticeId: crypto.randomUUID(), kind: input.kind,
+    const timeline=db?buildReceptionTimeline(db,input.accountId,input.conversationId):null;
+    return {timeline, dedupeKey, noticeId: crypto.randomUUID(), kind: input.kind,
       fields: { '客户': bounded(input.customer, 80), '想了解': bounded(input.need),
         '联系方式': bounded(input.contact), '我已完成': bounded(input.completed), '下一步': bounded(input.next) },
       details: input.details && typeof input.details === 'object' ? input.details : {},
