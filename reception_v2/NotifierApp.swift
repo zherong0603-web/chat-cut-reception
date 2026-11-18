@@ -28,6 +28,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: CardPanel?
     private var timer: Timer?
     private var currentId: String?
+    private var dismissedIds = Set<String>()
     private var pendingAcknowledgements = Set<String>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -65,7 +66,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         pendingAcknowledgements = pendingAcknowledgements.filter { pendingId in
             !currentCards.contains { $0["noticeId"] as? String == pendingId && ($0["acknowledgedAt"] as? String) != nil }
         }
-        guard let card = nextVisibleCard(currentCards, excluding: pendingAcknowledgements),
+        guard let card = nextVisibleCard(currentCards, excluding: pendingAcknowledgements.union(dismissedIds)),
               let id = card["noticeId"] as? String else {
             panel?.orderOut(nil); panel = nil; currentId = nil; return
         }
@@ -78,8 +79,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makePanel(card: [String: Any]) -> CardPanel {
-        let size = NSSize(width: 480, height: 570)
-        let panel = CardPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let size = NSSize(width: 480, height: 540)
+        let panel = CardPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        if let close = panel.standardWindowButton(.closeButton) { close.target = self; close.action = #selector(dismissCard(_:)) }
         panel.level = .floating
         panel.isOpaque = true
         panel.backgroundColor = .white
@@ -89,14 +95,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         panel.setFrameOrigin(NSPoint(x: screen.maxX - size.width - 24, y: screen.maxY - size.height - 24))
         let content = NSView(frame: NSRect(origin: .zero, size: size))
+        content.wantsLayer = true
+        content.layer?.cornerRadius = 14
+        content.layer?.masksToBounds = true
         panel.contentView = content
         let kind = card["kind"] as? String ?? "needs_operator"
         let title = NSTextField(labelWithString: labels[kind] ?? "需要你处理")
         title.font = .boldSystemFont(ofSize: 20)
         title.textColor = NSColor(calibratedRed: 0.08, green: 0.38, blue: 0.31, alpha: 1)
-        title.frame = NSRect(x: 24, y: 520, width: 432, height: 28)
+        title.frame = NSRect(x: 24, y: 478, width: 432, height: 28)
         content.addSubview(title)
-        let scroll = NSScrollView(frame: NSRect(x: 24, y: 64, width: 432, height: 440))
+        let scroll = NSScrollView(frame: NSRect(x: 24, y: 66, width: 432, height: 394))
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         let fields = card["fields"] as? [String: String] ?? [:]
@@ -112,7 +121,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             "联系方式\n" + (fields["联系方式"] ?? "未获得"),
             "下一步\n" + (fields["下一步"] ?? "")
         ].joined(separator: "\n\n")
-        let body = NSTextView(frame: NSRect(x: 0, y: 0, width: 414, height: 440))
+        let body = NSTextView(frame: NSRect(x: 0, y: 0, width: 414, height: 394))
         body.isEditable = false
         body.isSelectable = true
         body.drawsBackground = false
@@ -133,6 +142,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         ack.identifier = NSUserInterfaceItemIdentifier(card["noticeId"] as? String ?? "")
         content.addSubview(ack)
         return panel
+    }
+
+    @objc private func dismissCard(_ sender: Any?) {
+        if let id = currentId { dismissedIds.insert(id) }
+        panel?.orderOut(nil); panel = nil; currentId = nil
     }
 
     @objc private func acknowledge(_ sender: NSButton) {
