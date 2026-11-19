@@ -35,17 +35,43 @@ function localTime(ms) {
   if(!Number.isFinite(ms))return '时间未记录';
   return new Date(ms+8*3600_000).toISOString().replace('T',' ').slice(0,19)+'（北京时间）';
 }
-export function buildReceptionTimeline(db, accountId, uid) {
-  const opening=db.prepare("SELECT e.platform_time_ms,i.text FROM events e LEFT JOIN turn_inbound_events i ON i.event_id=e.event_id WHERE e.account_id=? AND e.conversation_id=? AND e.type='CUSTOMER_MESSAGE' ORDER BY e.platform_time_ms DESC,e.event_id DESC LIMIT 1").all(accountId,uid)[0];
-  const rows=db.prepare("SELECT kind,state,content,evidence_json FROM outbox WHERE account_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 10").all(accountId,uid).reverse();
-  const sentMessages=rows.map(row=>{
-    let receipt={};try{receipt=JSON.parse(row.evidence_json||'{}');}catch{}
-    const confirmed=row.state==='sent'&&receipt.verified===true;
-    const state=confirmed?'平台已确认':row.state==='prepared'?'尚未提交':row.state==='failed'?'发送失败':'尚不能确认发出';
-    const body=row.kind==='card'?'企业微信名片':bounded(row.content,1200);
-    return (confirmed?localTime(receipt.platformTimeMs)+' ':'')+state+'：'+body;
+export function buildReceptionTimeline(db, accountId, uid, saved = {}) {
+  const inbound = db.prepare("SELECT DISTINCT e.event_id,e.platform_time_ms,i.text FROM events e LEFT JOIN turn_inbound_events i ON i.event_id=e.event_id AND i.turn_id IN (SELECT turn_id FROM turns WHERE account_id=e.account_id AND conversation_id=e.conversation_id) WHERE e.account_id=? AND e.conversation_id=? AND e.type='CUSTOMER_MESSAGE' ORDER BY e.platform_time_ms DESC,e.event_id DESC LIMIT 10").all(accountId, uid);
+  const rows = db.prepare("SELECT o.kind,o.state,o.content,o.evidence_json,o.submitted_at_ms,(SELECT json_group_array(event_id) FROM turn_inbound_events WHERE turn_id=o.turn_id) AS source_event_ids_json FROM outbox o WHERE o.account_id=? AND o.conversation_id=? ORDER BY o.created_at DESC LIMIT 10").all(accountId, uid).reverse();
+  const customers = inbound.filter(row => bounded(row.text)).map(row => ({
+    role: 'customer', text: bounded(row.text, 1200), timeMs: Number.isFinite(row.platform_time_ms) ? row.platform_time_ms : null,
+    nativeId: row.event_id, status: 'observed',
+  }));
+  const savedText = bounded(saved.customerText || saved.customer_text, 1200);
+  const savedMs = Number.isFinite(saved.customerMessageTimeMs) ? saved.customerMessageTimeMs : null;
+  let independentUntimedSnapshot = null;
+  if (savedText && !customers.some(message => saved.customerNativeId
+    ? message.nativeId === saved.customerNativeId
+    : savedMs !== null && message.text === savedText && message.timeMs === savedMs)) {
+    const snapshot = {role: 'customer', text: savedText, timeMs: savedMs, nativeId: saved.customerNativeId || null, status: 'observed'};
+    customers.push(snapshot);
+    if (savedMs === null) independentUntimedSnapshot = snapshot;
+  }
+  const latestCustomer = independentUntimedSnapshot || customers.filter(message => message.timeMs !== null).sort((a, b) => b.timeMs - a.timeMs)[0] || customers.at(-1);
+  const outgoing = rows.map(row => {
+    let receipt = {}; try { receipt = JSON.parse(row.evidence_json || '{}'); } catch {}
+    const confirmed = row.state === 'sent' && receipt.verified === true;
+    const timeMs = confirmed && Number.isFinite(receipt.platformTimeMs) ? receipt.platformTimeMs : null;
+    let sourceIds = []; try { sourceIds = JSON.parse(row.source_event_ids_json || '[]'); } catch {}
+    return {role: 'our', text: row.kind === 'card' ? '企业微信名片' : bounded(row.content, 1200), timeMs,
+      status: confirmed ? 'confirmed' : row.state, kind: row.kind,
+      isAfterLatestCustomer: confirmed && timeMs !== null && latestCustomer?.timeMs != null && timeMs >= latestCustomer.timeMs
+        && Number.isFinite(row.submitted_at_ms) && row.submitted_at_ms >= latestCustomer.timeMs
+        && Array.isArray(sourceIds) && sourceIds.includes(latestCustomer.nativeId)};
+  });
+  const messages = [...customers, ...outgoing].sort((a, b) => (a.timeMs ?? Infinity) - (b.timeMs ?? Infinity));
+  const sentMessages = outgoing.map(message => {
+    const state = message.status === 'confirmed' ? '平台已确认' : message.status === 'prepared' ? '尚未提交' : message.status === 'failed' ? '发送失败' : '尚不能确认发出';
+    return (message.status === 'confirmed' ? localTime(message.timeMs) + ' ' : '') + state + '：' + message.text;
   }).join('\n');
-  return {customerText:opening?.text?bounded(opening.text,1200):'尚未记录客户文字原话',openedAt:opening?localTime(opening.platform_time_ms):'尚未记录客户文字开口',sentMessages:sentMessages||'本程序没有发送记录'};
+  return {customerText: latestCustomer?.text || '尚未记录客户文字原话',
+    openedAt: latestCustomer?.timeMs == null ? '开口时间未留存' : localTime(latestCustomer.timeMs), messages,
+    sentMessages: sentMessages || '本程序没有发送记录'};
 }
 
 export function createNotifierStore(runtimeDir, { db = null } = {}) {
@@ -56,7 +82,7 @@ export function createNotifierStore(runtimeDir, { db = null } = {}) {
   function serialize(operation) { const next = mutationTail.then(operation, operation); mutationTail = next.then(() => undefined, () => undefined); return next; }
   async function read() {
     if (!fs.existsSync(file)) return [];
-    try { const value = JSON.parse(fs.readFileSync(file, 'utf8')); return Array.isArray(value) ? value.map(card=>{try{return db?{...card,timeline:buildReceptionTimeline(db,card.accountId,card.conversationId)}:card;}catch{return card;}}) : []; }
+    try { const value = JSON.parse(fs.readFileSync(file, 'utf8')); return Array.isArray(value) ? value.map(card=>{try{return db?{...card,timeline:buildReceptionTimeline(db,card.accountId,card.conversationId,card.details||{})}:card;}catch{return card;}}) : []; }
     catch { return []; }
   }
   async function write(cards) { atomicJson(file, cards.slice(-100)); }
@@ -77,7 +103,7 @@ export function createNotifierStore(runtimeDir, { db = null } = {}) {
   function flushAcknowledgements() { return serialize(flushAcknowledgementsInner); }
   function cardFor(input) {
     const dedupeKey = [input.kind, input.accountId, input.conversationId, input.contact].join('\0');
-    const timeline=db?buildReceptionTimeline(db,input.accountId,input.conversationId):null;
+    const timeline=db?buildReceptionTimeline(db,input.accountId,input.conversationId,input.details||{}):null;
     return {timeline, dedupeKey, noticeId: crypto.randomUUID(), kind: input.kind,
       fields: { '客户': bounded(input.customer, 80), '想了解': bounded(input.need),
         '联系方式': bounded(input.contact), '我已完成': bounded(input.completed), '下一步': bounded(input.next) },

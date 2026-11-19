@@ -3,11 +3,6 @@ import Foundation
 
 private let queueName = "reception-v2-notification-queue.json"
 private let ackRequestName = "reception-v2-notification-ack-request.json"
-private let labels: [String: String] = [
-    "ready_to_follow": "可以跟进",
-    "needs_operator": "需要你处理",
-    "send_failed": "消息没有发出去",
-]
 
 private func runtimeDirectory() -> URL {
     let args = CommandLine.arguments
@@ -17,24 +12,43 @@ private func runtimeDirectory() -> URL {
     return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".runtime", isDirectory: true)
 }
 
-private final class CardPanel: NSPanel {
+final class CardPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
 
+private final class TopDownView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+private final class CardButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 @MainActor
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private let runtime = runtimeDirectory()
-    private var panel: CardPanel?
+    var panel: CardPanel?
     private var timer: Timer?
-    private var currentId: String?
+    var currentId: String?
+    private var currentRevision: Data?
+    var expandedRecord = false
     private var dismissedIds = Set<String>()
     private var pendingAcknowledgements = Set<String>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         dismissedIds = loadDismissedNotices(from: runtime.appendingPathComponent("reception-v2-dismissed-notices.json"))
+        pendingAcknowledgements = loadPendingAcknowledgements(from: ackRequestURL)
         NSApp.setActivationPolicy(.accessory)
-        if let output = ProcessInfo.processInfo.environment["RECEPTION_POPUP_PREVIEW"], let card = cards().first {
+        if let output = ProcessInfo.processInfo.environment["RECEPTION_POPUP_PREVIEW"] {
+            guard let card = cards().first(where: {
+                guard let id = ProcessInfo.processInfo.environment["RECEPTION_POPUP_NOTICE_ID"] else { return true }
+                return $0["noticeId"] as? String == id
+            }) else {
+                NSApp.terminate(nil)
+                return
+            }
+            expandedRecord = ProcessInfo.processInfo.environment["RECEPTION_POPUP_EXPANDED"] == "1"
             let preview = makePanel(card: card)
             if let view = preview.contentView, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                 view.cacheDisplay(in: view.bounds, to: bitmap)
@@ -61,7 +75,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func requestAcknowledgement(_ id: String) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: ["noticeId": id], options: []) else { return false }
+        var ids = pendingAcknowledgements
+        ids.formUnion(loadPendingAcknowledgements(from: ackRequestURL))
+        ids.insert(id)
+        guard let data = try? JSONSerialization.data(withJSONObject: ["noticeIds": ids.sorted()], options: []) else { return false }
         let temp = ackRequestURL.path + ".swift.tmp"
         do {
             try data.write(to: URL(fileURLWithPath: temp), options: [.atomic])
@@ -82,127 +99,137 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
               let id = card["noticeId"] as? String else {
             panel?.orderOut(nil); panel = nil; currentId = nil; return
         }
-        if currentId == id, panel?.isVisible == true { return }
+        let revision = try? JSONSerialization.data(withJSONObject: card, options: [.sortedKeys])
+        if currentId == id, currentRevision == revision, panel?.isVisible == true { return }
+        if currentId != id { expandedRecord = false }
         currentId = id
-        panel?.close()
+        currentRevision = revision
+        panel?.orderOut(nil)
         let created = makePanel(card: card)
         panel = created
         created.orderFrontRegardless()
     }
 
-    private func makePanel(card: [String: Any]) -> CardPanel {
-        let size = NSSize(width: 420, height: 440)
-        let panel = CardPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
+    func makePanel(card: [String: Any]) -> CardPanel {
+        let presentation = receptionCardPresentation(card)
+        let width: CGFloat = 420, padding: CGFloat = 24, bodyWidth = width - 2 * padding
+        let document = TopDownView(frame: NSRect(x: 0, y: 0, width: bodyWidth, height: 0))
+        var cursor: CGFloat = 0
+        let ink = NSColor(calibratedWhite: 0.14, alpha: 1)
+        let secondary = NSColor(calibratedWhite: 0.43, alpha: 1)
+        func text(_ value: String, size: CGFloat = 14, weight: NSFont.Weight = .regular,
+                  color: NSColor? = nil, gap: CGFloat = 8) {
+            let label = NSTextField(wrappingLabelWithString: value)
+            label.font = .systemFont(ofSize: size, weight: weight)
+            label.textColor = color ?? ink
+            label.maximumNumberOfLines = 0
+            let height = ceil(label.sizeThatFits(NSSize(width: bodyWidth, height: 10000)).height)
+            label.frame = NSRect(x: 0, y: cursor, width: bodyWidth, height: max(18, height))
+            document.addSubview(label)
+            cursor += max(18, height) + gap
+        }
+        let statusWidth: CGFloat = min(178, max(72, CGFloat(presentation.contact.count) * 12 + 16))
+        let name = NSTextField(wrappingLabelWithString: presentation.customer)
+        name.font = .systemFont(ofSize: 14, weight: .semibold)
+        name.textColor = ink
+        let nameHeight = max(20, ceil(name.sizeThatFits(NSSize(width: bodyWidth - statusWidth - 12, height: 10000)).height))
+        name.frame = NSRect(x: 0, y: cursor, width: bodyWidth - statusWidth - 12, height: nameHeight)
+        document.addSubview(name)
+        let status = NSTextField(wrappingLabelWithString: presentation.contact)
+        status.font = .systemFont(ofSize: 12, weight: .medium)
+        status.textColor = NSColor(calibratedRed: 0.05, green: 0.43, blue: 0.33, alpha: 1)
+        let statusHeight = max(20, ceil(status.sizeThatFits(NSSize(width: statusWidth, height: 10000)).height))
+        status.frame = NSRect(x: bodyWidth - statusWidth, y: cursor, width: statusWidth, height: statusHeight)
+        status.alignment = .right
+        document.addSubview(status)
+        cursor += max(nameHeight, statusHeight) + 5
+        text(presentation.openedAt.replacingOccurrences(of: "（北京时间）", with: " · 北京时间"), size: 12, color: secondary, gap: 20)
+        let visibleLines = expandedRecord ? presentation.lines : compactReceptionLines(presentation.lines)
+        if visibleLines.count < presentation.lines.count { text("更早的对话见完整记录", size: 12, color: secondary) }
+        for line in visibleLines {
+            if line.isReceipt {
+                text(line.caption + "  " + line.text, size: 12, color: secondary, gap: 18)
+            } else {
+                text(line.caption, size: 12, weight: .medium, color: secondary, gap: 4)
+                text(line.text, gap: 18)
+            }
+        }
+        cursor += 2
+        text("已完成：" + presentation.completed, size: 13, gap: 6)
+        text("下一步：" + presentation.next, size: 13, weight: .medium, gap: 0)
+        if expandedRecord {
+            cursor += 22
+            text("记录说明", size: 12, weight: .semibold, color: secondary)
+            text("消息与名片仅按本程序保存的平台确认记录展示。缺少时间或发送记录时保留缺失说明。", size: 12, color: secondary)
+            if let details = card["details"], let data = try? JSONSerialization.data(withJSONObject: details, options: [.prettyPrinted, .sortedKeys]), let detailText = String(data: data, encoding: .utf8) {
+                text(detailText, size: 11, color: secondary, gap: 0)
+            }
+        }
+        let documentHeight = ceil(cursor)
+        document.frame.size.height = documentHeight
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let bodyHeight = min(documentHeight, max(180, screen.height - 210))
+        let size = NSSize(width: width, height: 64 + bodyHeight + 72)
+        let panel = CardPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.appearance = NSAppearance(named: .aqua)
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
-        if let close = panel.standardWindowButton(.closeButton) { close.target = self; close.action = #selector(dismissCard(_:)) }
         panel.level = .floating
-        panel.isOpaque = true
-        panel.backgroundColor = .white
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.becomesKeyOnlyIfNeeded = true
-        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         panel.setFrameOrigin(NSPoint(x: screen.maxX - size.width - 24, y: screen.maxY - size.height - 24))
-        let content = NSView(frame: NSRect(origin: .zero, size: size))
+        let content = TopDownView(frame: NSRect(origin: .zero, size: size))
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor.white.cgColor
-        content.layer?.cornerRadius = 14
+        content.layer?.cornerRadius = 16
         content.layer?.masksToBounds = true
         panel.contentView = content
-        let kind = card["kind"] as? String ?? "needs_operator"
-        let title = NSTextField(labelWithString: labels[kind] ?? "需要你处理")
-        title.font = .boldSystemFont(ofSize: 20)
-        title.textColor = NSColor(calibratedRed: 0.08, green: 0.38, blue: 0.31, alpha: 1)
-        title.frame = NSRect(x: 24, y: 378, width: 372, height: 28)
+        let title = NSTextField(labelWithString: "客户接待")
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.textColor = ink
+        title.frame = NSRect(x: padding, y: 23, width: 240, height: 22)
         content.addSubview(title)
-        let close = NSButton(title: "关闭 ×", target: self, action: #selector(dismissCard(_:)))
-        close.bezelStyle = .inline
-        close.frame = NSRect(x: 326, y: 382, width: 74, height: 24)
-        content.addSubview(close)
-        title.frame.size.width = 260
-        let scroll = NSScrollView(frame: NSRect(x: 24, y: 66, width: 372, height: 292))
-        scroll.hasVerticalScroller = true
+        func button(_ title: String, action: Selector, frame: NSRect) -> CardButton {
+            let control = CardButton(title: title, target: self, action: action)
+            control.isBordered = false
+            control.font = .systemFont(ofSize: 13, weight: .medium)
+            control.attributedTitle = NSAttributedString(string: title, attributes: [.font: control.font!, .foregroundColor: ink])
+            control.frame = frame
+            control.focusRingType = .none
+            content.addSubview(control)
+            return control
+        }
+        let close = button("关闭 ×", action: #selector(dismissCard(_:)), frame: NSRect(x: width - 96, y: 18, width: 76, height: 32))
+        close.identifier = NSUserInterfaceItemIdentifier("close-card")
+        close.toolTip = "关闭当前提醒，本批旧提醒不会再弹出"
+        let scroll = NSScrollView(frame: NSRect(x: padding, y: 64, width: bodyWidth, height: bodyHeight))
+        scroll.hasVerticalScroller = documentHeight > bodyHeight
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
         scroll.drawsBackground = false
-        let fields = card["fields"] as? [String: String] ?? [:]
-        let timeline = card["timeline"] as? [String: String] ?? [:]
-        let details = card["details"] as? [String: Any] ?? [:]
-        let quote = timeline["customerText"] ?? details["customerText"] as? String ?? details["customer_text"] as? String ?? "原话未记录"
-        let document = NSView(frame: NSRect(x: 0, y: 0, width: 354, height: 600))
-        var cursor: CGFloat = 0
-        func block(_ text: String, role: String? = nil, outgoing: Bool = false, muted: Bool = false) {
-            let inset: CGFloat = role == nil ? 0 : 12
-            let x: CGFloat = outgoing ? 30 : 0
-            let width: CGFloat = role == nil ? 350 : 320
-            let value = NSTextField(wrappingLabelWithString: text)
-            value.font = .systemFont(ofSize: muted ? 12 : 14)
-            value.textColor = muted ? .secondaryLabelColor : NSColor(calibratedWhite: 0.15, alpha: 1)
-            let measured = (text as NSString).boundingRect(with: NSSize(width: width - inset * 2, height: 10000), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: value.font!]).height
-            let labelHeight = max(20, ceil(measured) + 4)
-            let height = labelHeight + (role == nil ? 0 : 40)
-            let container = NSView(frame: NSRect(x: x, y: cursor, width: width, height: height))
-            if let role = role {
-                container.wantsLayer = true
-                container.layer?.cornerRadius = 10
-                container.layer?.backgroundColor = (outgoing ? NSColor(calibratedRed: 0.91, green: 0.95, blue: 1, alpha: 1) : NSColor(calibratedWhite: 0.95, alpha: 1)).cgColor
-                let caption = NSTextField(labelWithString: role)
-                caption.font = .systemFont(ofSize: 11, weight: .medium)
-                caption.textColor = .secondaryLabelColor
-                caption.frame = NSRect(x: 12, y: height - 26, width: width - 24, height: 16)
-                container.addSubview(caption)
-            }
-            value.frame = NSRect(x: inset, y: role == nil ? 0 : 12, width: width - inset * 2, height: labelHeight)
-            container.addSubview(value)
-            document.addSubview(container)
-            cursor += height + 14
-        }
-        block((fields["客户"] ?? "") + "  ·  " + (fields["联系方式"] ?? ""), muted: true)
-        if quote != "原话未记录" && quote != "尚未记录客户文字原话" && !quote.isEmpty {
-            block(quote, role: "客户  " + (timeline["openedAt"] ?? ""))
-        }
-        if let sent = timeline["sentMessages"], sent != "本程序没有发送记录", !sent.isEmpty {
-            for message in sent.components(separatedBy: "\n") { block(message, role: "我方", outgoing: true) }
-        }
-        if let completed = fields["我已完成"], !completed.isEmpty { block("已完成  " + completed, muted: true) }
-        if let next = fields["下一步"], !next.isEmpty { block("下一步  " + next, muted: true) }
-        let documentHeight = max(cursor, 292)
-        for view in document.subviews { view.frame.origin.y = documentHeight - view.frame.maxY }
-        document.frame.size.height = documentHeight
         scroll.documentView = document
         content.addSubview(scroll)
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, documentHeight - 292)))
-        let history = NSButton(title: "查看完整记录", target: self, action: #selector(showFullRecord(_:)))
-        history.bezelStyle = .inline
-        history.frame = NSRect(x: 24, y: 20, width: 126, height: 32)
-        history.toolTip = "在本窗口滚动查看最近十条发送记录"
-        content.addSubview(history)
-        let ack = NSButton(title: "知道了", target: nil, action: nil)
-        ack.bezelStyle = .rounded
-        ack.frame = NSRect(x: 284, y: 20, width: 112, height: 32)
-        ack.target = self
-        ack.action = #selector(acknowledge(_:))
+        scroll.contentView.scroll(to: .zero)
+        let footerY = size.height - 52
+        let history = button(expandedRecord ? "收起记录" : "查看完整记录", action: #selector(showFullRecord(_:)), frame: NSRect(x: padding - 6, y: footerY, width: 116, height: 32))
+        history.identifier = NSUserInterfaceItemIdentifier("full-record")
+        let ack = button("知道了", action: #selector(acknowledge(_:)), frame: NSRect(x: width - padding - 96, y: footerY, width: 96, height: 32))
         ack.identifier = NSUserInterfaceItemIdentifier(card["noticeId"] as? String ?? "")
-        content.addSubview(ack)
+        ack.wantsLayer = true
+        ack.layer?.backgroundColor = NSColor(calibratedWhite: 0.94, alpha: 1).cgColor
+        ack.layer?.cornerRadius = 7
         return panel
     }
 
     @objc private func showFullRecord(_ sender: NSButton) {
-        guard let scroll = panel?.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first else { return }
-        guard let panel = panel, let content = panel.contentView else { return }
-        let expanding = sender.title == "查看完整记录"
-        let delta: CGFloat = expanding ? 160 : -160
-        var frame = panel.frame
-        frame.origin.y -= delta
-        frame.size.height += delta
-        panel.setFrame(frame, display: true)
-        content.frame.size.height += delta
-        for view in content.subviews where view !== scroll && view.frame.minY > 300 { view.frame.origin.y += delta }
-        scroll.frame.size.height += delta
-        sender.title = expanding ? "收起记录" : "查看完整记录"
-        scroll.flashScrollers()
+        guard let id = currentId, let card = cards().first(where: { $0["noticeId"] as? String == id }) else { return }
+        expandedRecord.toggle()
+        let wasVisible = panel?.isVisible == true
+        panel?.orderOut(nil)
+        let created = makePanel(card: card)
+        panel = created
+        if wasVisible { created.orderFrontRegardless() }
     }
 
     @objc private func dismissCard(_ sender: Any?) {
@@ -223,6 +250,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+#if !RECEPTION_NOTIFIER_TESTS
 @main
 struct ReceptionNotifierMain {
     @MainActor static func main() {
@@ -232,3 +260,5 @@ struct ReceptionNotifierMain {
         app.run()
     }
 }
+
+#endif

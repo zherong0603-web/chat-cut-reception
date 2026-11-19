@@ -130,18 +130,20 @@ export function createOrchestrator(deps) {
         for (const contact of contacts) deps.store.upsertContact(contact);
         const verified=contacts.filter(contact=>contact.verified!==false), candidates=contacts.filter(contact=>contact.verified===false);
         if(candidates.length){
-          const customerText=activeInboundMessages(scoped).at(-1)?.text || row.preview || '';
+          const customerMessage=(scoped.messages||[]).filter(message=>message.isCustomerText===true).sort((a,b)=>a.platformTimeMs-b.platformTimeMs).at(-1);
+          const customerText=customerMessage?.text || '';
           await enqueue({kind:'needs_operator',accountId:scoped.accountId,conversationId:scoped.conversationId,
             customer:scoped.nickname||row.uid,need:customerText||'当前客户',contact:candidates.map(contactDisplay).join('；'),
             completed:'发现疑似联系方式，尚未确认',next:'请核对后联系客户；自动接待继续',details:{candidates,customerText}});
         }
         if(!verified.length)return {contacts,candidates};
         deps.store.setConversationState(scoped.accountId, scoped.conversationId, ConversationState.CONTACT_OBTAINED);
-        const customerText=activeInboundMessages(scoped).at(-1)?.text || row.preview || '';
+        const customerMessage=(scoped.messages||[]).filter(message=>message.isCustomerText===true).sort((a,b)=>a.platformTimeMs-b.platformTimeMs).at(-1);
+        const customerText=customerMessage?.text || '';
         await enqueue({ kind: 'ready_to_follow', accountId: scoped.accountId, conversationId: scoped.conversationId,
           customer: scoped.nickname || row.uid, need: customerText || '已进线客户',
           contact: verified.map(contactDisplay).join('；'),
-          completed: '已读取当前客户资料', next: '请销售马上联系客户', details: { contacts: verified, candidates, customerText } });
+          completed: '已读取当前客户资料', next: '请销售马上联系客户', details: { contacts: verified, candidates, customerText, customerMessageTimeMs: customerMessage?.platformTimeMs ?? null, customerNativeId: customerMessage?.nativeId ?? null } });
         return { handled: { state: ConversationState.CONTACT_OBTAINED, contacts: verified } };
       };
       const firstContacts=preExcluded?{handled:null,contacts:[]}:await observeContacts(scope);if(firstContacts.handled)return {...firstContacts.handled,cardClickAck};
