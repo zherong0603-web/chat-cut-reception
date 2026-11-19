@@ -32,6 +32,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingAcknowledgements = Set<String>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        dismissedIds = loadDismissedNotices(from: runtime.appendingPathComponent("reception-v2-dismissed-notices.json"))
         NSApp.setActivationPolicy(.accessory)
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -79,7 +80,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makePanel(card: [String: Any]) -> CardPanel {
-        let size = NSSize(width: 480, height: 540)
+        let size = NSSize(width: 420, height: 440)
         let panel = CardPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
@@ -103,25 +104,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let title = NSTextField(labelWithString: labels[kind] ?? "需要你处理")
         title.font = .boldSystemFont(ofSize: 20)
         title.textColor = NSColor(calibratedRed: 0.08, green: 0.38, blue: 0.31, alpha: 1)
-        title.frame = NSRect(x: 24, y: 478, width: 432, height: 28)
+        title.frame = NSRect(x: 24, y: 378, width: 372, height: 28)
         content.addSubview(title)
-        let scroll = NSScrollView(frame: NSRect(x: 24, y: 66, width: 432, height: 394))
+        let close = NSButton(title: "关闭 ×", target: self, action: #selector(dismissCard(_:)))
+        close.bezelStyle = .inline
+        close.frame = NSRect(x: 326, y: 382, width: 74, height: 24)
+        content.addSubview(close)
+        title.frame.size.width = 260
+        let scroll = NSScrollView(frame: NSRect(x: 24, y: 66, width: 372, height: 292))
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         let fields = card["fields"] as? [String: String] ?? [:]
         let timeline = card["timeline"] as? [String: String] ?? [:]
         let details = card["details"] as? [String: Any] ?? [:]
         let quote = timeline["customerText"] ?? details["customerText"] as? String ?? details["customer_text"] as? String ?? "原话未记录"
-        let text = [
-            "客户  " + (fields["客户"] ?? ""),
-            "最近开口  " + (timeline["openedAt"] ?? "时间未记录"),
-            "客户说\n" + quote,
-            "已完成\n" + (fields["我已完成"] ?? "操作未记录"),
-            "我方发送记录\n" + (timeline["sentMessages"] ?? "旧通知没有保存发送明细"),
-            "联系方式\n" + (fields["联系方式"] ?? "未获得"),
-            "下一步\n" + (fields["下一步"] ?? "")
-        ].joined(separator: "\n\n")
-        let body = NSTextView(frame: NSRect(x: 0, y: 0, width: 414, height: 394))
+        var sections = ["客户  " + (fields["客户"] ?? "")]
+        if let time = timeline["openedAt"], time != "时间未记录" && time != "尚未记录客户文字开口" { sections.append(time) }
+        if quote != "原话未记录" && quote != "尚未记录客户文字原话" && !quote.isEmpty { sections.append("客户\n" + quote) }
+        if let sent = timeline["sentMessages"], sent != "本程序没有发送记录", !sent.isEmpty {
+            sections.append("我方\n" + sent)
+        }
+        if let completed = fields["我已完成"], !completed.isEmpty { sections.append("已完成  " + completed) }
+        if let contact = fields["联系方式"], !contact.isEmpty { sections.append("联系方式  " + contact) }
+        if let next = fields["下一步"], !next.isEmpty { sections.append("下一步  " + next) }
+        let text = sections.joined(separator: "\n\n")
+        let body = NSTextView(frame: NSRect(x: 0, y: 0, width: 354, height: 292))
         body.isEditable = false
         body.isSelectable = true
         body.drawsBackground = false
@@ -136,7 +143,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         content.addSubview(scroll)
         let ack = NSButton(title: "知道了", target: nil, action: nil)
         ack.bezelStyle = .rounded
-        ack.frame = NSRect(x: 344, y: 20, width: 112, height: 32)
+        ack.frame = NSRect(x: 284, y: 20, width: 112, height: 32)
         ack.target = self
         ack.action = #selector(acknowledge(_:))
         ack.identifier = NSUserInterfaceItemIdentifier(card["noticeId"] as? String ?? "")
@@ -145,7 +152,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func dismissCard(_ sender: Any?) {
-        if let id = currentId { dismissedIds.insert(id) }
+        var updated = dismissedIds
+        for card in cards() { if let id = card["noticeId"] as? String { updated.insert(id) } }
+        do {
+            try saveDismissedNotices(updated, to: runtime.appendingPathComponent("reception-v2-dismissed-notices.json"))
+            dismissedIds = updated
+        } catch { return }
         panel?.orderOut(nil); panel = nil; currentId = nil
     }
 
