@@ -113,3 +113,10 @@ test('prepared card helper still blocks the final click outside reply hours',asy
   await assert.rejects(()=>clickPreparedWeComCard({page,scope,assertActive:async()=>{},canSend:()=>false}),/outside_reply_hours/);
   assert.equal(calls.includes('send'),false);
 });
+
+test('explicit user login opens an on-screen window while background defaults stay hidden',async()=>{
+  const {browserLaunchOptions}=await import('../browser.mjs');
+  const chromium={executablePath:()=>'/cache/chromium/Google Chrome for Testing'};
+  const interactive=browserLaunchOptions({chromium,headless:false,visible:true,env:{}});
+  assert.deepEqual(interactive,{headless:false,executablePath:'/cache/chromium/Google Chrome for Testing'});
+});

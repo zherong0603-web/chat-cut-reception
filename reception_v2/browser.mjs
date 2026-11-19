@@ -145,9 +145,9 @@ export async function selectVisibleConversation(page, scope, modeFn) {
   throw new Error('exact_visible_customer_row_required');
 }
 
-export function browserLaunchOptions({ chromium, headless, env = process.env }) {
+export function browserLaunchOptions({ chromium, headless, visible = false, env = process.env }) {
   const executablePath=String(env.XHS_BROWSER_EXECUTABLE||'').trim() || (typeof chromium?.executablePath==='function'?chromium.executablePath():null);
-  return { headless, ...(executablePath?{executablePath}:{}), ...(headless?{}:{args:['--window-position=-10000,-10000']}) };
+  return { headless, ...(executablePath?{executablePath}:{}), ...((headless||visible)?{}:{args:['--window-position=-10000,-10000']}) };
 }
 
 async function waitForInbox(page, accountName) {
@@ -175,16 +175,17 @@ async function loadChromium() {
   return chromium;
 }
 
-export async function openInteractiveLogin({ profileDir, accountName, timeoutMs = 15 * 60_000 }) {
+export async function openInteractiveLogin({ profileDir, accountName, visible = false, signal = null, timeoutMs = 15 * 60_000 }) {
   const chromium = await loadChromium();
   fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(profileDir, 0o700);
-  const context = await chromium.launchPersistentContext(profileDir, browserLaunchOptions({chromium,headless:false}));
+  const context = await chromium.launchPersistentContext(profileDir, browserLaunchOptions({chromium,headless:false,visible}));
   const page = context.pages()[0] || await context.newPage();
   try {
     await page.goto('https://sxt.xiaohongshu.com/im/multiCustomerService', { waitUntil: 'domcontentloaded', timeout: 15_000 });
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error('interactive_login_cancelled');
       const title = await page.title();
       if (acceptsAccountTitle(title, accountName)) return { accountTitle: title };
       await page.waitForTimeout(500);

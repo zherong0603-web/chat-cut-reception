@@ -23,6 +23,20 @@ XHS_PLAYWRIGHT_MODULE=/已有/playwright/index.js reception_v2/launch-reception-
 
 `login` 只打开项目隔离浏览器并等待指定账号标题出现，不启动接待、不发送消息。不带 `--arm` 的运行模式只读取页面，不发送。`--arm --pilot-one` 只处理一位可见超时客户，然后关闭浏览器、释放锁并退出，不进入持续轮询。`launch-reception-v2.sh` 会原样转发附加参数，例如 `--pilot-one`；通知器只由 `main.mjs` 启动和管理。
 
+## 重新登录现有账号
+
+在 Finder 中双击项目根目录的 `重新登录小红书.command`，在弹出的项目专用浏览器中扫码或使用手机号登录配置中的账号。保留命令窗口，直到程序显示检查结果。
+
+入口复用同一账号的 `isolated-browser-profile`。它会暂停原本已加载的接待 LaunchAgent，等待原进程释放目录，持有项目原锁完成登录，然后恢复原服务。本人启动的这次登录窗口明确可见；正常接待仍使用后台浏览器。不会使用日常 Chrome 或修改回复时段。
+
+只有恢复后取得两次递进的成功消息读取，才显示接待恢复正常。登录已保存但服务读取未通过时会单独提示；原服务未加载时保留停止状态。入口遇到取消或登录失败也会尝试恢复原来已加载的服务，不清除待确认发送或重新发送它们。
+
+仅检查入口配置，不启动浏览器或改变服务：
+
+```sh
+node reception_v2/relogin-service.mjs --check
+```
+
 ## 持续运行
 
 生产运行由 `~/Library/LaunchAgents/com.chatcut.reception-v2.plist` 管理。该 LaunchAgent 在工作区直接执行 Node，不在“文稿”目录里再套一层 shell，因此不会触发额外的文件夹执行权限问题；`RunAtLoad` 负责登录后启动，`KeepAlive` 负责异常退出后拉起。
