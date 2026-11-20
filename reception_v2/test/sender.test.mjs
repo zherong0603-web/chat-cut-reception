@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { openDatabase } from '../db.mjs';
 import { createSender, verifyNativeHistory } from '../sender.mjs';
+import { createReplySchedule } from '../reply-schedule.mjs';
 
 const accountId='aaaaaaaaaaaaaaaaaaaaaaaa', conversationId='bbbbbbbbbbbbbbbbbbbbbbbb';
 function fixture(overrides={}) {
@@ -167,4 +168,60 @@ test('pair entry closes both original intents without leaving prepared rows',asy
 test('pair text DOM click rejected by window marks both original intents failed',async()=>{
   const f=fixture();f.browser.state.manual=true;f.browser.clickTextSend=async()=>{throw new Error('outside_reply_hours')};const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});const card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
   try{const result=await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,1000);assert.equal(result.state,'outside_reply_hours');assert.equal(f.store.getIntent(text.intentId).state,'failed');assert.equal(f.store.getIntent(card.intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+for(const kind of ['text','card','pair'])test(`a ${kind} send rechecks the native source after an async mode lookup crosses into the evening`,async()=>{
+ const source=Date.parse('2026-11-21T08:59:59.900+08:00');let now=source;
+ const evening=Date.parse('2026-11-21T18:00:00+08:00');
+ const f=fixture({receipt:{platformTimeMs:evening+100,observedAtMs:evening+200},senderOptions:{now:()=>now,replySchedule:createReplySchedule({now:()=>now})}});f.browser.state.manual=true;
+ const mode=f.browser.mode;f.browser.mode=async scope=>{const value=await mode(scope);now=evening;return value;};
+ const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'本轮回复'});
+ const card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+ try{
+  const result=kind==='text'?await f.sender.sendText(text.intentId,f.scope,source):kind==='card'?await f.sender.sendWeComCard(card.intentId,f.scope,source):await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,source);
+  assert.equal(f.browser.calls.length,0);assert.equal(result.state,'outside_reply_hours');
+  assert.equal(f.store.getIntent(kind==='card'?card.intentId:text.intentId).state,'failed');
+  if(kind==='pair')assert.equal(f.store.getIntent(card.intentId).state,'failed');
+ }
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('takeover rechecks the native source after a mode lookup resumes in another window',async()=>{
+ const source=Date.parse('2026-11-21T08:59:59.900+08:00');let now=source;
+ const f=fixture({senderOptions:{now:()=>now,replySchedule:createReplySchedule({now:()=>now})}});
+ const mode=f.browser.mode;f.browser.mode=async scope=>{const value=await mode(scope);now=Date.parse('2026-11-21T18:00:00+08:00');return value;};
+ try{await assert.rejects(()=>f.sender.enterHumanMode(f.scope,source),/outside_inbound_reply_window/);assert.equal(f.browser.calls.length,0);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('crossing to the evening after a morning text submit preserves uncertainty and blocks its card',async()=>{
+ const source=Date.parse('2026-11-21T08:59:59.900+08:00');let now=source;
+ const f=fixture({senderOptions:{now:()=>now,replySchedule:createReplySchedule({now:()=>now})}});f.browser.state.manual=true;
+ const click=f.browser.clickTextSend;f.browser.clickTextSend=async(...args)=>{await click(...args);now=Date.parse('2026-11-21T18:00:00+08:00');};
+ const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'本轮回复'}),card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+ try{await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,source);assert.equal(f.browser.calls.includes('click-card'),false);assert.equal(f.browser.calls.includes('card'),false);assert.equal(f.store.getIntent(text.intentId).state,'uncertain');assert.equal(f.store.getIntent(card.intentId).state,'failed');}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('the exact native source timestamp reaches the final browser send hook',async()=>{
+ const source=Date.parse('2026-11-21T07:10:00+08:00');let received=null;
+ const f=fixture({receipt:{platformTimeMs:source+100,observedAtMs:source+200},senderOptions:{now:()=>source,replySchedule:createReplySchedule({now:()=>source})}});f.browser.state.manual=true;
+ const click=f.browser.clickTextSend;f.browser.clickTextSend=async(scope,sourceTime)=>{received=sourceTime;return click(scope);};
+ const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'本轮回复'});
+ try{const result=await f.sender.sendText(intent.intentId,f.scope,source);assert.equal(result.state,'sent');assert.equal(received,source);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+for(const kind of ['text','pair'])test(`a ${kind} DOM fill rejected after a cross-window resume closes unsubmitted intents`,async()=>{
+ const source=Date.parse('2026-11-21T08:59:59.900+08:00');let now=source;
+ const f=fixture({senderOptions:{now:()=>now,replySchedule:createReplySchedule({now:()=>now})}});f.browser.state.manual=true;
+ f.browser.fillText=async()=>{now=Date.parse('2026-11-21T18:00:00+08:00');const error=new Error('outside_reply_hours: outside_inbound_reply_window');error.code='outside_reply_hours';throw error;};
+ const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'本轮回复'}),card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+ try{
+  const result=kind==='text'?await f.sender.sendText(text.intentId,f.scope,source):await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,source);
+  assert.equal(result.state,'outside_reply_hours');assert.equal(f.store.getIntent(text.intentId).state,'failed');assert.equal(f.store.getIntent(text.intentId).submittedAtMs,null);assert.equal(f.store.getIntent(text.intentId).payload.reason,'outside_inbound_reply_window');
+  assert.equal(f.browser.calls.includes('text'),false);assert.equal(f.browser.calls.includes('click-card'),false);
+  if(kind==='pair'){assert.equal(f.store.getIntent(card.intentId).state,'failed');assert.equal(f.store.getIntent(card.intentId).submittedAtMs,null);}
+ }
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });

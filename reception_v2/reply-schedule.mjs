@@ -46,3 +46,26 @@ export function sidebarTimeInReplyWindow(value,currentLocalTime=null){
   const currentSeconds=clockSeconds(currentLocalTime);
   return currentSeconds!==null&&replySegment(currentSeconds)===segment;
 }
+
+export function replyWindowStartMs(nowMs=Date.now(),options={}){
+  if(!Number.isFinite(nowMs))return null;
+  const current=replyWindowState(nowMs,options);
+  if(!current.allowed)return null;
+  const hour=current.allDay===true?'00':clockSeconds(current.localTime)<9*3600?'07':'18';
+  return Date.parse(`${current.localDate}T${hour}:00:00+08:00`);
+}
+
+export function platformTimeInReplyWindow(platformTimeMs,nowMs=Date.now(),options={}){
+  if(!Number.isFinite(platformTimeMs)||!Number.isFinite(nowMs)||platformTimeMs>nowMs)return false;
+  const startMs=replyWindowStartMs(nowMs,options);
+  return startMs!==null&&platformTimeMs>=startMs;
+}
+
+export function assertReplySourceWindow(replySchedule,platformTimeMs,nowMs=Date.now()){
+  if(!replySchedule)return;
+  if(replySchedule.isAllowed()!==true){const error=new Error('outside_reply_hours');error.code='outside_reply_hours';throw error;}
+  const window=replySchedule.state?.()||{};
+  if(!platformTimeInReplyWindow(platformTimeMs,nowMs,{overrideDates:window.allDay===true?[window.overrideDate]:[]})){
+    const error=new Error('outside_reply_hours: outside_inbound_reply_window');error.code='outside_reply_hours';throw error;
+  }
+}

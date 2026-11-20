@@ -7,15 +7,16 @@ import { openDatabase } from '../db.mjs';
 import { composeReply } from '../responder.mjs';
 import { createSender } from '../sender.mjs';
 import { createOrchestrator, isTodaySidebarTime, parseSidebarTimeToday } from '../orchestrator.mjs';
+import { createReplySchedule } from '../reply-schedule.mjs';
 const accountId='aaaaaaaaaaaaaaaaaaaaaaaa',u1='bbbbbbbbbbbbbbbbbbbbbbbb',u2='cccccccccccccccccccccccc';
 const facts={approved:true,account_name:'运去哪海外仓',supported_regions:['美国','墨西哥'],unsupported_regions:['日本'],service_capabilities:['海外仓储','一件代发'],unsupported_services:['个人寄件'],qualification_fields:['货品']};
 function browserWith(state){const calls=state.calls,b={state:{manual:true},mode:async()=>({manual:b.state.manual,inputReady:true,scopeReady:true,pageVisible:true,overlayVisible:!b.state.manual,takeoverVisible:!b.state.manual}),clickTakeover:async()=>{calls.push('takeover');b.state.manual=true},fillText:async(_s,text)=>{calls.push('fill:'+text)},clickTextSend:async()=>{calls.push('text-send')},sendCard:async()=>{calls.push('card-send')},waitForReceipt:async(intent)=>state.receiptFor(intent)};return b;}
-function fixture({rows=[{uid:u1,nickname:'甲',needsReply:true}],scopes={}}={}){
+function fixture({rows=[{uid:u1,nickname:'甲',needsReply:true}],scopes={},sourceTimeMs=1000}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'reception-v2-orch-'));const store=openDatabase(path.join(dir,'db.sqlite3'));const state={calls:[],cards:[],rows};const fixtureClock={value:10000};
- state.receiptFor=intent=>({serverStatus:'confirmed',accountId,conversationId:intent.conversationId,content:intent.content,type:intent.kind==='card'?'CARD':'TEXT',cardTitle:intent.kind==='card'?'企微_运去哪海外仓（企微）':null,platformTimeMs:2100,observedAtMs:2200,visibleAtMs:2200,
+ state.receiptFor=intent=>({serverStatus:'confirmed',accountId,conversationId:intent.conversationId,content:intent.content,type:intent.kind==='card'?'CARD':'TEXT',cardTitle:intent.kind==='card'?'企微_运去哪海外仓（企微）':null,platformTimeMs:sourceTimeMs+1100,observedAtMs:sourceTimeMs+1200,visibleAtMs:sourceTimeMs+1200,
    senderId:accountId,receiverId:intent.conversationId,direction:'OUTBOUND',nativeId:`id_${accountId}.${intent.conversationId}.${intent.intentId}`});
- const browser=browserWith(state),sender=createSender({store,browser,now:()=>1800});
- const scopeFor=uid=>scopes[uid]||{accountId,conversationId:uid,nickname:uid===u1?'甲':'乙',profileFields:[],messages:[{nativeId:'jarvis-msg-'+uid+'.'+accountId+'.m1',direction:'left',type:'TEXT',text:'你好',platformTimeMs:1000,isCustomerText:true}]};
+ const browser=browserWith(state),sender=createSender({store,browser,now:()=>sourceTimeMs+800});
+ const scopeFor=uid=>scopes[uid]||{accountId,conversationId:uid,nickname:uid===u1?'甲':'乙',profileFields:[],messages:[{nativeId:'jarvis-msg-'+uid+'.'+accountId+'.m1',direction:'left',type:'TEXT',text:'你好',platformTimeMs:sourceTimeMs,isCustomerText:true}]};
  const deps={store,sender,composeReply:(args)=>composeReply({...args,facts}),facts,accountId,readSidebar:async()=>({rows}),selectConversation:async uid=>scopeFor(uid),readContacts:async()=>[],revealMaskedContacts:async()=>[],notifier:{enqueue:async card=>{state.cards.push(card)},notifyBlocked:async card=>{state.cards.push(card)}},now:()=>fixtureClock.value,sleep:async ms=>{fixtureClock.value+=ms;}};
  const orchestrator=createOrchestrator(deps);
  return {dir,store,state,browser,sender,orchestrator,scopeFor,facts};
@@ -227,8 +228,8 @@ test('sender outside-window result does not leave the turn waiting for contact',
 });
 
 test('all-day override allows ordinary morning rows and expires by schedule state',async()=>{
-  const now=new Date(2026,10,2,10,0,0).getTime();const f=fixture({rows:[{uid:u1,nickname:'真实卖家',needsReply:true,preview:'美国仓报价',time:'10:00:00'}]});
-  const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:{isAllowed:()=>true,state:()=>({allowed:true,allDay:true,overrideDate:'2026-11-02',reason:'date_override'})}});
+  const now=Date.parse('2026-11-02T10:00:00+08:00');const f=fixture({sourceTimeMs:now,rows:[{uid:u1,nickname:'真实卖家',needsReply:true,preview:'美国仓报价',time:'10:00:00'}]});
+  const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:createReplySchedule({now:()=>now,overrideDates:['2026-11-02']})});
   try{const result=await o.pollOnce();assert.equal(result.processed,1);assert.equal(f.store.listTurns(accountId,u1).length,1);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
@@ -245,7 +246,7 @@ test('new morning and 18:00 customer openings enter the existing reception path'
  const {createReplySchedule}=await import('../reply-schedule.mjs');
  for(const time of ['07:10:00','18:10:00']){
   const now=Date.parse(`2026-11-21T${time}+08:00`);
-  const f=fixture({rows:[{uid:u1,nickname:'测试客户',needsReply:true,preview:'咨询美国仓',time}]});
+  const f=fixture({sourceTimeMs:now,rows:[{uid:u1,nickname:'测试客户',needsReply:true,preview:'咨询美国仓',time}]});
   const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:createReplySchedule({now:()=>now})});
   try{const result=await o.pollOnce();assert.equal(result.processed,1,time);assert.equal(f.state.calls.filter(x=>x==='text-send').length,1,time);}
   finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
@@ -266,8 +267,131 @@ test('the first open poll responds to a customer arriving exactly at 07:00 or 18
  const {createReplySchedule}=await import('../reply-schedule.mjs');
  for(const start of ['07:00:00','18:00:00']){
   let now=Date.parse(`2026-11-21T${start}+08:00`)-1000;let rows=[];
-  const f=fixture({rows});const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,readSidebar:async()=>({rows}),replySchedule:createReplySchedule({now:()=>now})});
+  const f=fixture({rows,sourceTimeMs:now+1000});const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,readSidebar:async()=>({rows}),replySchedule:createReplySchedule({now:()=>now})});
   try{await o.pollOnce();now+=1000;rows=[{uid:u1,nickname:'测试客户',needsReply:false,preview:'咨询美国仓',time:start}];const result=await o.pollOnce();assert.equal(result.processed,1,start);assert.equal(f.state.calls.filter(x=>x==='text-send').length,1,start);}
   finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
  }
+});
+
+function scheduledNativeFixture({now=Date.parse('2026-11-21T18:10:00+08:00'),sourceTime=now,entry=false,extraMessages=[],preview='客户咨询',platformAiActive=false}={}){
+ const scope={accountId,conversationId:u1,nickname:'测试客户',profileFields:[],messages:[...extraMessages,{nativeId:`jarvis-msg-${u1}.${accountId}.current`,direction:entry?'center':'left',type:entry?'RICH_HINT':'TEXT',text:entry?'对方通过广告进入私信':'咨询美国仓',platformTimeMs:sourceTime,isCustomerText:!entry,isEntryHint:entry}]};
+ const rows=[{uid:u1,nickname:'测试客户',needsReply:true,time:'18:10:00',preview,platformAiActive}];
+ const f=fixture({rows,scopes:{[u1]:scope}});
+ f.state.receiptFor=intent=>({serverStatus:'confirmed',accountId,conversationId:u1,content:intent.content,type:intent.kind==='card'?'CARD':'TEXT',cardTitle:intent.kind==='card'?'企微_运去哪海外仓（企微）':null,platformTimeMs:now+100,observedAtMs:now+200,senderId:accountId,receiverId:u1,direction:'OUTBOUND',nativeId:`id_${accountId}.${u1}.${intent.intentId}`});
+ const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,sleep:async()=>{},replySchedule:createReplySchedule({now:()=>now})});
+ return {...f,o,scope,rows,now};
+}
+
+for(const [label,sourceTime] of [
+ ['yesterday',Date.parse('2026-11-20T18:09:00+08:00')],
+ ['this morning',Date.parse('2026-11-21T08:30:00+08:00')],
+ ['before evening opening',Date.parse('2026-11-21T17:59:59+08:00')],
+ ['in the future',Date.parse('2026-11-21T18:10:01+08:00')],
+])test(`a current sidebar clock cannot authorize an inbound from ${label}`,async()=>{
+ const f=scheduledNativeFixture({sourceTime});f.browser.state.manual=false;
+ try{const result=await f.o.processRow(f.rows[0]);assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,0);assert.equal(f.state.calls.length,0);assert.equal(result.skipped,true);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('startup takeover does not interrupt platform AI for an old native inbound',async()=>{
+ const f=scheduledNativeFixture({sourceTime:Date.parse('2026-11-20T18:09:00+08:00'),platformAiActive:true});f.browser.state.manual=false;
+ try{const result=await f.o.takeoverVisiblePlatformAi();assert.equal(result.processed,0);assert.equal(f.state.calls.length,0);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a sidebar card-click clock cannot authorize an acknowledgment without a current native click',async()=>{
+ const f=scheduledNativeFixture({sourceTime:Date.parse('2026-11-20T18:09:00+08:00'),preview:'对方已点击你的企业微信联系卡'});
+ try{await f.o.processRow(f.rows[0],{contactOnly:true});assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,0);assert.equal(f.state.calls.length,0);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a current native entry can trigger reception while old history remains context only',async()=>{
+ const old={nativeId:`jarvis-msg-${u1}.${accountId}.old`,direction:'left',type:'TEXT',text:'昨天的问题',platformTimeMs:Date.parse('2026-11-20T18:09:00+08:00'),isCustomerText:true};
+ const f=scheduledNativeFixture({entry:true,extraMessages:[old]});
+ try{const result=await f.o.processRow(f.rows[0]);assert.equal(result.turn.sourceEventId,f.scope.messages.at(-1).nativeId);assert.equal(result.turn.openedAtMs,f.now);assert.equal(f.store.listTurns(accountId,u1).length,1);assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM events').get().n,1);assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('contact-only profile collection remains available without a current message and sends nothing',async()=>{
+ const f=scheduledNativeFixture({sourceTime:Date.parse('2026-11-20T18:09:00+08:00')});
+ f.o.deps.readContacts=async()=>[{accountId,conversationId:u1,kind:'phone',value:'17300006725',source:'profile',verified:true}];
+ try{const result=await f.o.processRow(f.rows[0],{contactOnly:true});assert.equal(result.state,'contact_obtained');assert.equal(f.state.calls.length,0);assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,0);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a fresh opening starts a new turn instead of inheriting an off-hours quiet window',async()=>{
+ const now=Date.parse('2026-11-21T18:00:00.100+08:00');
+ const f=scheduledNativeFixture({now});
+ f.store.ingestInbound({accountId,conversationId:u1,eventId:'off-hours-original',text:'早一点的问题',platformTimeMs:Date.parse('2026-11-21T17:59:59.900+08:00')});
+ try{const result=await f.o.processRow(f.rows[0]);assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);assert.equal(result.turn.openedAtMs,now);assert.equal(f.store.listTurns(accountId,u1).length,2);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a current native card click receives one ack without creating a new visitor',async()=>{
+ const f=scheduledNativeFixture({sourceTime:Date.parse('2026-11-20T18:09:00+08:00'),preview:'对方已点击你的企业微信联系卡'});
+ f.scope.messages.push({nativeId:`jarvis-msg-${u1}.${accountId}.clicked`,direction:'center',type:'RICH_HINT',text:'对方已点击你的企业微信联系卡',platformTimeMs:f.now-500,isEntryHint:true});
+ try{await f.o.processRow(f.rows[0],{contactOnly:true});assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);assert.deepEqual(f.store.db.prepare('SELECT type FROM events').all().map(row=>row.type),['CARD_CLICK']);assert.equal(f.store.db.prepare("SELECT count(*) AS n FROM outbox WHERE kind='card'").get().n,0);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a current system hint or right-side message does not create a new visitor or send eligibility',async()=>{
+ const f=scheduledNativeFixture();
+ f.scope.messages=[{nativeId:`jarvis-msg-${u1}.${accountId}.limit`,direction:'center',type:'RICH_HINT',text:'对方关注或回复你之前，24小时内最多只能发1条文字消息',platformTimeMs:f.now,isEntryHint:true},
+ {nativeId:`jarvis-msg-${accountId}.${u1}.out`,direction:'right',type:'TEXT',text:'AI欢迎语',platformTimeMs:f.now,isCustomerText:false}];
+ try{const result=await f.o.processRow(f.rows[0]);assert.equal(result.skipped,true);assert.equal(f.state.calls.length,0);assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM events').get().n,0);assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,0);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('an unchanged sidebar gets a bounded recheck when current native messages hydrate after an old snapshot',async()=>{
+ let now=Date.parse('2026-11-21T18:10:00+08:00'),rows=[];let selections=0;
+ const f=scheduledNativeFixture({now,sourceTime:Date.parse('2026-11-20T18:09:00+08:00')});
+ const current={...f.scope,messages:[{...f.scope.messages[0],nativeId:`jarvis-msg-${u1}.${accountId}.hydrated`,platformTimeMs:now}]};
+ const o=createOrchestrator({...f.o.deps,now:()=>now,readSidebar:async()=>({rows}),replySchedule:createReplySchedule({now:()=>now}),selectConversation:async()=>{selections++;return selections===1?f.scope:current}});
+ try{
+  await o.pollOnce();rows=[{...f.rows[0],needsReply:false}];await o.pollOnce();
+  now+=250;await o.pollOnce();
+  assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);
+  assert.equal(f.store.db.prepare('SELECT event_id FROM events').get().event_id,current.messages[0].nativeId);
+  assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM events').get().n,1);
+ }
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a genuinely old native conversation exhausts its recheck budget instead of being read every poll',async()=>{
+ let now=Date.parse('2026-11-21T18:10:00+08:00'),selections=0;
+ const f=scheduledNativeFixture({now,sourceTime:Date.parse('2026-11-20T18:09:00+08:00')});
+ const o=createOrchestrator({...f.o.deps,now:()=>now,replySchedule:createReplySchedule({now:()=>now}),selectConversation:async()=>{selections++;return f.scope}});
+ try{
+  for(let i=0;i<40;i++){await o.pollOnce();now+=250;}
+  assert.equal(selections,3);assert.equal(f.state.calls.length,0);assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,0);
+  f.rows[0]={...f.rows[0],preview:'新的一条美国仓问题'};f.scope.messages=[{...f.scope.messages[0],nativeId:`jarvis-msg-${u1}.${accountId}.new-question`,platformTimeMs:now}];
+  const receipt=f.state.receiptFor;f.state.receiptFor=intent=>({...receipt(intent),platformTimeMs:now+100,observedAtMs:now+200});
+  await o.pollOnce();assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);
+ }
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('an existing native card click cannot reuse an off-hours turn to submit an ack',async()=>{
+ const now=Date.parse('2026-11-21T18:00:00.100+08:00');
+ const f=scheduledNativeFixture({now,sourceTime:Date.parse('2026-11-20T18:09:00+08:00'),preview:'对方已点击你的企业微信联系卡'});
+ f.rows[0].time='18:00:00';
+ const click={nativeId:`jarvis-msg-${u1}.${accountId}.existing-click`,direction:'center',type:'RICH_HINT',text:'对方已点击你的企业微信联系卡',platformTimeMs:now,isEntryHint:true};f.scope.messages.push(click);
+ const old=f.store.ingestInbound({accountId,conversationId:u1,eventId:'off-hours-before-click',text:'旧消息',platformTimeMs:now-200});
+ f.store.ingestInbound({accountId,conversationId:u1,eventId:click.nativeId,text:'',type:'CARD_CLICK',platformTimeMs:now});
+ try{const result=await f.o.processRow(f.rows[0],{contactOnly:true});assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,0);assert.equal(result.skipped,true);assert.equal(f.store.db.prepare('SELECT opened_at_ms FROM turns WHERE turn_id=?').get(old.turnId).opened_at_ms,now-200);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a slow native hydration can recover on the cooled-down read without a sidebar change',async()=>{
+ let now=Date.parse('2026-11-21T18:10:00+08:00'),selections=0;
+ const f=scheduledNativeFixture({now,sourceTime:Date.parse('2026-11-20T18:09:00+08:00')});
+ const o=createOrchestrator({...f.o.deps,now:()=>now,replySchedule:createReplySchedule({now:()=>now}),selectConversation:async()=>{selections++;return f.scope}});
+ try{
+  for(let i=0;i<8;i++){await o.pollOnce();now+=250;}
+  assert.equal(selections,3);
+  f.scope.messages=[{...f.scope.messages[0],nativeId:`jarvis-msg-${u1}.${accountId}.slow-hydration`,platformTimeMs:now}];
+  const receipt=f.state.receiptFor;f.state.receiptFor=intent=>({...receipt(intent),platformTimeMs:now+100,observedAtMs:now+200});
+  now+=300_000;await o.pollOnce();assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);
+ }
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });

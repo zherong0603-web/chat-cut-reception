@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { replyWindowState, sidebarTimeInReplyWindow } from '../reply-schedule.mjs';
+import { platformTimeInReplyWindow, replyWindowStartMs, replyWindowState, sidebarTimeInReplyWindow } from '../reply-schedule.mjs';
 const at=value=>Date.parse(value);
 
 test('daily reply windows are 07:00-09:00 and 18:00-24:00 Shanghai, retaining the midnight submit guard',()=>{
@@ -36,4 +36,30 @@ test('historical all-day override remains bounded by its configured date and mid
  assert.equal(replyWindowState(at('2026-11-03T11:00:00+08:00'),options).allowed,false);
  assert.equal(replyWindowState(at('2026-11-03T07:30:00+08:00'),options).allowed,true);
  assert.equal(replyWindowState(at('2026-11-03T18:30:00+08:00'),options).allowed,true);
+});
+
+test('native source eligibility uses the complete Shanghai date and active segment, never the sidebar clock',()=>{
+ for(const [source,now,want] of [
+  ['2026-11-21T06:59:59+08:00','2026-11-21T07:00:00+08:00',false],
+  ['2026-11-21T07:00:00+08:00','2026-11-21T07:00:00+08:00',true],
+  ['2026-11-21T08:59:59+08:00','2026-11-21T09:00:00+08:00',false],
+  ['2026-11-21T17:59:59+08:00','2026-11-21T18:00:00+08:00',false],
+  ['2026-11-21T18:00:00+08:00','2026-11-21T18:00:00+08:00',true],
+  ['2026-11-21T23:59:29+08:00','2026-11-21T23:59:29+08:00',true],
+  ['2026-11-21T23:59:29+08:00','2026-11-21T23:59:30+08:00',false],
+  ['2026-11-20T18:09:00+08:00','2026-11-21T18:10:00+08:00',false],
+  ['2026-11-21T08:30:00+08:00','2026-11-21T18:10:00+08:00',false],
+  ['2026-11-21T18:10:00.001+08:00','2026-11-21T18:10:00+08:00',false],
+  ['2026-11-20T23:00:00Z','2026-11-21T00:00:00Z',true],
+ ])assert.equal(platformTimeInReplyWindow(at(source),at(now)),want,`${source} at ${now}`);
+ const options={overrideDates:['2026-11-02']};
+ assert.equal(platformTimeInReplyWindow(at('2026-11-02T10:00:00+08:00'),at('2026-11-02T11:00:00+08:00'),options),true);
+ assert.equal(platformTimeInReplyWindow(at('2026-11-01T11:00:00+08:00'),at('2026-11-02T11:00:00+08:00'),options),false);
+ assert.equal(platformTimeInReplyWindow(at('2026-11-03T10:00:00+08:00'),at('2026-11-03T11:00:00+08:00'),options),false);
+ assert.equal(platformTimeInReplyWindow(at('2026-11-02T23:59:29+08:00'),at('2026-11-02T23:59:30+08:00'),options),false);
+ assert.equal(platformTimeInReplyWindow(null,at('2026-11-21T18:10:00+08:00')),false);
+ assert.equal(replyWindowStartMs(at('2026-11-21T07:10:00+08:00')),at('2026-11-21T07:00:00+08:00'));
+ assert.equal(replyWindowStartMs(at('2026-11-21T18:10:00+08:00')),at('2026-11-21T18:00:00+08:00'));
+ assert.equal(replyWindowStartMs(at('2026-11-02T11:00:00+08:00'),options),at('2026-11-02T00:00:00+08:00'));
+ assert.equal(replyWindowStartMs(at('2026-11-21T09:00:00+08:00')),null);
 });

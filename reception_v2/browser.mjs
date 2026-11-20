@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 
 import { DEFAULT_CARD } from './account-config.mjs';
 import { acceptsAccountTitle } from './sidebar.mjs';
+import { assertReplySourceWindow } from './reply-schedule.mjs';
 const MESSAGE_ENDPOINT = '/api-sxt/edith/chatline/msg';
 
 export function nativeMessageBelongsToIntent(id, intent) {
@@ -50,7 +51,12 @@ export async function prepareWeComCardPanel(root, cardConfig = DEFAULT_CARD) {
   await root.locator('.chat-tool-wrap .card-box__content-title[title="' + cardConfig.title + '"]').filter({ visible: true }).waitFor({ state: 'visible', timeout: 2000 });
 }
 
-async function clickPreparedCardElement({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true }) {
+function assertNativeSendAllowed({canSend=()=>true,replySchedule=null,sourcePlatformTimeMs=null,now=Date.now}){
+  if(canSend()!==true)throw new Error('outside_reply_hours');
+  assertReplySourceWindow(replySchedule,sourcePlatformTimeMs,now());
+}
+
+async function clickPreparedCardElement({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true,replySchedule=null,sourcePlatformTimeMs=null,now=Date.now }) {
   const root = activeConversationRootLocator(page, scope);
   if (await root.count() !== 1) throw new Error('exact_active_conversation_root_required');
   const title = root.locator('.chat-tool-wrap .card-box__content-title[title="' + cardConfig.title + '"]').filter({ visible: true });
@@ -60,29 +66,30 @@ async function clickPreparedCardElement({ page, scope, cardConfig = DEFAULT_CARD
   await cardElement.hover({ timeout: 1000 });
   const button = cardElement.getByRole('button', { name: '发送', exact: true });
   if (await button.count() !== 1 || !(await button.isEnabled())) throw new Error('unique_enabled_card_send_required');
-  if(canSend()!==true)throw new Error('outside_reply_hours');
+  assertNativeSendAllowed({canSend,replySchedule,sourcePlatformTimeMs,now});
   await button.click({ timeout: 1000 }); await assertActive(scope);
 }
 
-export async function clickPreparedWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true }) {
+export async function clickPreparedWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true,replySchedule=null,sourcePlatformTimeMs=null,now=Date.now }) {
   await assertActive(scope);
-  return clickPreparedCardElement({page,scope,cardConfig,assertActive,canSend});
+  return clickPreparedCardElement({page,scope,cardConfig,assertActive,canSend,replySchedule,sourcePlatformTimeMs,now});
 }
 
-export async function sendConfiguredWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true }) {
+export async function sendConfiguredWeComCard({ page, scope, cardConfig = DEFAULT_CARD, assertActive = async () => {}, canSend = () => true,replySchedule=null,sourcePlatformTimeMs=null,now=Date.now }) {
   await assertActive(scope);
   const root = activeConversationRootLocator(page, scope);
   if (await root.count() !== 1) throw new Error('exact_active_conversation_root_required');
+  assertNativeSendAllowed({canSend,replySchedule,sourcePlatformTimeMs,now});
   await prepareWeComCardPanel(root, cardConfig); await assertActive(scope);
-  return clickPreparedCardElement({page,scope,cardConfig,assertActive,canSend});
+  return clickPreparedCardElement({page,scope,cardConfig,assertActive,canSend,replySchedule,sourcePlatformTimeMs,now});
 }
 
-export async function clickConfiguredTextSend({ page, scope, assertActive = async () => {}, canSend = () => true }) {
+export async function clickConfiguredTextSend({ page, scope, assertActive = async () => {}, canSend = () => true,replySchedule=null,sourcePlatformTimeMs=null,now=Date.now }) {
   await assertActive(scope);const root=activeConversationRootLocator(page,scope);
   if(await root.count()!==1)throw new Error('exact_active_conversation_root_required');
   const button=root.locator('.reply-bottom-bar button').filter({visible:true});
   if(await button.count()!==1||!(await button.isEnabled()))throw new Error('unique_enabled_send_control_required');
-  if(canSend()!==true)throw new Error('outside_reply_hours');
+  assertNativeSendAllowed({canSend,replySchedule,sourcePlatformTimeMs,now});
   await button.click({timeout:1000});await assertActive(scope);
 }
 
@@ -275,7 +282,7 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
         manual: !overlayVisible && !takeoverVisible && switches.length === 1 && inputReady,
         inputReady, overlayVisible, takeoverVisible, accountId, conversationId };
     }, { accountId: scope.accountId, conversationId: scope.conversationId }); },
-    async clickTakeover(scope) { await page.evaluate(({ conversationId }) => {
+    async clickTakeover(scope,sourcePlatformTimeMs) { assertNativeSendAllowed({canSend,replySchedule,sourcePlatformTimeMs});await page.evaluate(({ conversationId }) => {
       const rendered = el => el?.checkVisibility ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : Boolean(el?.getClientRects?.().length);
       const rows = Array.from(document.querySelectorAll('.sx-contact-item.active')).filter(rendered)
         .filter(el => el.getAttribute('data-key') === 'Total-' + conversationId);
@@ -286,16 +293,17 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
       if (buttons.length !== 1 || buttons[0].disabled) throw new Error('native_takeover_control_required');
       buttons[0].click();
     }, { conversationId: scope.conversationId }); },
-    async fillText(scope, text) { await assertActive(scope); const root = activeConversationRootLocator(page, scope);
+    async fillText(scope, text,sourcePlatformTimeMs) { await assertActive(scope); const root = activeConversationRootLocator(page, scope);
       if (await root.count() !== 1) throw new Error('exact_active_conversation_root_required');
       const input = root.locator('.reply-box-wrap textarea.reply-textarea').filter({ visible: true });
       if (await input.count() !== 1) throw new Error('unique_message_input_required');
       if (await input.inputValue() !== '') throw new Error('existing_operator_draft_preserved');
+      assertNativeSendAllowed({canSend,replySchedule,sourcePlatformTimeMs});
       await input.fill(text, { timeout: 1000 }); pendingText = text; await assertActive(scope); },
-    async clickTextSend(scope) { return clickConfiguredTextSend({page,scope,assertActive,canSend}); },
-    async prepareCard(scope) { await assertActive(scope); const root=activeConversationRootLocator(page,scope); if(await root.count()!==1)throw new Error('exact_active_conversation_root_required'); await prepareWeComCardPanel(root,cardConfig); await assertActive(scope); },
-    async clickPreparedCard(scope) { return clickPreparedWeComCard({page,scope,cardConfig,assertActive,canSend}); },
-    async sendCard(scope) { return sendConfiguredWeComCard({ page, scope, cardConfig, assertActive, canSend }); },
+    async clickTextSend(scope,sourcePlatformTimeMs) { return clickConfiguredTextSend({page,scope,assertActive,canSend,replySchedule,sourcePlatformTimeMs}); },
+    async prepareCard(scope,sourcePlatformTimeMs) { await assertActive(scope); const root=activeConversationRootLocator(page,scope); if(await root.count()!==1)throw new Error('exact_active_conversation_root_required'); assertNativeSendAllowed({canSend,replySchedule,sourcePlatformTimeMs});await prepareWeComCardPanel(root,cardConfig); await assertActive(scope); },
+    async clickPreparedCard(scope,sourcePlatformTimeMs) { return clickPreparedWeComCard({page,scope,cardConfig,assertActive,canSend,replySchedule,sourcePlatformTimeMs}); },
+    async sendCard(scope,sourcePlatformTimeMs) { return sendConfiguredWeComCard({ page, scope, cardConfig, assertActive, canSend,replySchedule,sourcePlatformTimeMs }); },
     async waitForReceipt(intent, { startedAtMs = 0, timeoutMs = 2000 } = {}) { const deadline = Date.now() + timeoutMs;
       while (Date.now() <= deadline) {
         const candidates = nativeRecords.filter(record => record.requestStartedAtMs >= startedAtMs && record.responseOk === true &&

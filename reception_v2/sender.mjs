@@ -1,5 +1,6 @@
 import { DEFAULT_CARD } from './account-config.mjs';
 import { OutboxState } from './domain.mjs';
+import { assertReplySourceWindow } from './reply-schedule.mjs';
 
 function normalized(value) { return String(value || '').normalize('NFC').replace(/\s+/g, ' ').trim(); }
 
@@ -18,6 +19,7 @@ export function verifyNativeHistory(intent, receipt, sourcePlatformTimeMs, submi
 }
 
 function isOutsideReplyWindow(error){return error?.code==='outside_reply_hours'||/outside_reply_hours/.test(String(error?.message||''));}
+function outsideFailureReason(error){return /outside_inbound_reply_window/.test(String(error?.message||''))?'outside_inbound_reply_window':'outside_reply_hours';}
 function isPlatformBlock(error) {
   return error?.code === 'platform_blocked' || /platform_blocked|发送受限|无法发送/.test(String(error?.message || ''));
 }
@@ -25,19 +27,21 @@ function isPlatformBlock(error) {
 export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.now, replySchedule = null }) {
   if (!store || !browser) throw new TypeError('store_and_browser_required');
 
-  function assertReplyWindow(){if(replySchedule&&replySchedule.isAllowed()!==true){const error=new Error('outside_reply_hours');error.code='outside_reply_hours';throw error;}}
+  function assertReplyWindow(sourcePlatformTimeMs){assertReplySourceWindow(replySchedule,sourcePlatformTimeMs,now());}
 
-  async function enterHumanMode(scope) {
-    assertReplyWindow();
+  async function enterHumanMode(scope,sourcePlatformTimeMs=null) {
+    assertReplyWindow(sourcePlatformTimeMs);
     const before = await browser.mode(scope);
+    assertReplyWindow(sourcePlatformTimeMs);
     if (before.pageVisible === false) throw new Error('page_not_visible');
     if (!before.scopeReady) throw new Error('scope_not_ready');
     if (before.manual && before.inputReady) return { clicked: false, before, after: before };
     if (!before.takeoverVisible) throw new Error('native_takeover_control_required');
-    await browser.clickTakeover(scope);
+    await browser.clickTakeover(scope,sourcePlatformTimeMs);
     let after = null;
     for (let index = 0; index < 20; index++) {
       after = await browser.mode(scope);
+      assertReplyWindow(sourcePlatformTimeMs);
       if (after.manual && after.inputReady) return { clicked: true, before, after };
       await new Promise(resolve => setTimeout(resolve, 25));
     }
@@ -89,13 +93,15 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
   async function sendText(intentId, scope, sourcePlatformTimeMs) {
     const intent = store.getIntent(intentId);
     if (!['text', 'contact_fallback'].includes(intent.kind) || intent.state !== OutboxState.PREPARED) throw new Error('intent_not_prepared');
-    try{assertReplyWindow();}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};throw error;}
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};throw error;}
     const mode = await browser.mode(scope);
     if (mode.pageVisible === false) throw new Error('page_not_visible');
     if (mode.conversationId && mode.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
     if (!mode.manual || !mode.inputReady) throw new Error('native_manual_mode_required');
-    try { await browser.fillText(scope, intent.content); }
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};throw error;}
+    try { await browser.fillText(scope, intent.content,sourcePlatformTimeMs); }
     catch (error) {
+      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};
       if (isPlatformBlock(error)) return { state: 'send_blocked', intent: store.markFailed(intentId, 'platform_blocked') };
       throw error;
     }
@@ -103,16 +109,16 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     if (afterFill.pageVisible === false) throw new Error('page_not_visible');
     if (afterFill.conversationId && afterFill.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
     if (!afterFill.manual || !afterFill.inputReady) throw new Error('native_manual_mode_required');
-    try{assertReplyWindow();}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};throw error;}
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};throw error;}
     const startedAtMs = now();
     store.markSending(intentId, startedAtMs);
     try {
-      await browser.clickTextSend(scope);
+      await browser.clickTextSend(scope,sourcePlatformTimeMs);
       const receipt = await browser.waitForReceipt(store.getIntent(intentId), { startedAtMs });
       const initial = await finalize(intentId, scope, sourcePlatformTimeMs, receipt, startedAtMs);
       return await retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial);
     } catch (error) {
-      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};
+      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};
       if (isPlatformBlock(error)) return { state: 'send_blocked', intent: store.markFailed(intentId, 'platform_blocked') };
       return { state: 'uncertain', intent: store.markUncertain(intentId, { error: error?.message || 'send_error' }) };
     }
@@ -121,21 +127,21 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
   async function sendWeComCard(intentId, scope, sourcePlatformTimeMs) {
     const intent = store.getIntent(intentId);
     if (intent.kind !== 'card' || intent.state !== OutboxState.PREPARED) throw new Error('intent_not_prepared');
-    try{assertReplyWindow();}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};throw error;}
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};throw error;}
     const mode = await browser.mode(scope);
     if (mode.pageVisible === false) throw new Error('page_not_visible');
     if (mode.conversationId && mode.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
     if (!mode.manual || !mode.inputReady) throw new Error('native_manual_mode_required');
-    try{assertReplyWindow();}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};throw error;}
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};throw error;}
     const startedAtMs = now();
     store.markSending(intentId, startedAtMs);
     try {
-      await browser.sendCard(scope);
+      await browser.sendCard(scope,sourcePlatformTimeMs);
       const receipt = await browser.waitForReceipt(store.getIntent(intentId), { startedAtMs });
       const initial = await finalize(intentId, scope, sourcePlatformTimeMs, receipt, startedAtMs);
       return await retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial);
     } catch (error) {
-      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,'outside_reply_hours')};
+      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};
       if (isPlatformBlock(error)) return { state: 'send_blocked', intent: store.markFailed(intentId, 'platform_blocked') };
       return { state: 'uncertain', intent: store.markUncertain(intentId, { error: error?.message || 'send_error' }) };
     }
@@ -146,40 +152,43 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     const textIntent = store.getIntent(textIntentId), cardIntent = store.getIntent(cardIntentId);
     if (textIntent.kind !== 'text' || textIntent.state !== OutboxState.PREPARED ||
         cardIntent.kind !== 'card' || cardIntent.state !== OutboxState.PREPARED) throw new Error('intent_not_prepared');
-    try{assertReplyWindow();}catch(error){if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,'outside_reply_hours');store.markFailed(cardIntentId,'outside_reply_hours');return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}throw error;}
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,outsideFailureReason(error));store.markFailed(cardIntentId,outsideFailureReason(error));return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}throw error;}
     const mode = await browser.mode(scope);
     if (mode.pageVisible === false) throw new Error('page_not_visible');
     if (mode.conversationId && mode.conversationId !== scope.conversationId) throw new Error('active_uid_changed_before_send');
     if (!mode.manual || !mode.inputReady) throw new Error('native_manual_mode_required');
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,outsideFailureReason(error));store.markFailed(cardIntentId,outsideFailureReason(error));return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}throw error;}
     let cardPrepared=false;
     if(typeof browser.prepareCard==='function'){
-      try{await browser.prepareCard(scope);cardPrepared=true;}catch(error){
-        if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,'outside_reply_hours');store.markFailed(cardIntentId,'outside_reply_hours');return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}
+      try{await browser.prepareCard(scope,sourcePlatformTimeMs);cardPrepared=true;}catch(error){
+        if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,outsideFailureReason(error));store.markFailed(cardIntentId,outsideFailureReason(error));return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}
       }
       await assertSafeMode(scope);
     }
-    try { await browser.fillText(scope, textIntent.content); }
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,outsideFailureReason(error));store.markFailed(cardIntentId,outsideFailureReason(error));return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}throw error;}
+    try { await browser.fillText(scope, textIntent.content,sourcePlatformTimeMs); }
     catch (error) {
+      if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,outsideFailureReason(error));store.markFailed(cardIntentId,outsideFailureReason(error));return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}
       if (isPlatformBlock(error)) return { state: 'send_blocked', text: { state: 'send_blocked', intent: store.markFailed(textIntentId, 'platform_blocked') }, card: null };
       throw error;
     }
     await assertSafeMode(scope);
-    try{assertReplyWindow();}catch(error){if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,'outside_reply_hours');store.markFailed(cardIntentId,'outside_reply_hours');return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}throw error;}
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(isOutsideReplyWindow(error)){store.markFailed(textIntentId,outsideFailureReason(error));store.markFailed(cardIntentId,outsideFailureReason(error));return {state:'outside_reply_hours',text:{state:'failed',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}throw error;}
     const textStartedAtMs = now(); store.markSending(textIntentId, textStartedAtMs);
-    try { await browser.clickTextSend(scope); }
+    try { await browser.clickTextSend(scope,sourcePlatformTimeMs); }
     catch (error) {
-      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',text:{state:'failed',intent:store.markFailed(textIntentId,'outside_reply_hours')},card:{state:'failed',intent:store.markFailed(cardIntentId,'outside_reply_hours')}};
+      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',text:{state:'failed',intent:store.markFailed(textIntentId,outsideFailureReason(error))},card:{state:'failed',intent:store.markFailed(cardIntentId,outsideFailureReason(error))}};
       if (isPlatformBlock(error)) return { state: 'send_blocked', text: { state: 'send_blocked', intent: store.markFailed(textIntentId, 'platform_blocked') }, card: null };
       store.markUncertain(textIntentId, { error: error?.message || 'send_error' });
       return { state: 'uncertain', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: null };
     }
     await assertSafeMode(scope);
-    try{assertReplyWindow();}catch(error){if(!isOutsideReplyWindow(error))throw error;store.markUncertain(textIntentId,{error:'reply_window_closed_after_text_submit'});store.markFailed(cardIntentId,'outside_reply_hours');return {state:'outside_reply_hours',text:{state:'uncertain',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}
+    try{assertReplyWindow(sourcePlatformTimeMs);}catch(error){if(!isOutsideReplyWindow(error))throw error;store.markUncertain(textIntentId,{error:'reply_window_closed_after_text_submit'});store.markFailed(cardIntentId,outsideFailureReason(error));return {state:'outside_reply_hours',text:{state:'uncertain',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.getIntent(cardIntentId)},withinTwoSeconds:false,withinThreeSeconds:false};}
     const cardStartedAtMs = now(); store.markSending(cardIntentId, cardStartedAtMs);
-    try { if(cardPrepared===true)await browser.clickPreparedCard(scope);else await browser.sendCard(scope); }
+    try { if(cardPrepared===true)await browser.clickPreparedCard(scope,sourcePlatformTimeMs);else await browser.sendCard(scope,sourcePlatformTimeMs); }
     catch (error) {
       store.markUncertain(textIntentId, { error: 'card_send_failed_after_text_submit' });
-      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',text:{state:'uncertain',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.markFailed(cardIntentId,'outside_reply_hours')},withinTwoSeconds:false,withinThreeSeconds:false};
+      if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',text:{state:'uncertain',intent:store.getIntent(textIntentId)},card:{state:'failed',intent:store.markFailed(cardIntentId,outsideFailureReason(error))},withinTwoSeconds:false,withinThreeSeconds:false};
       if (isPlatformBlock(error)) return { state: 'send_blocked', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: { state: 'send_blocked', intent: store.markFailed(cardIntentId, 'platform_blocked') } };
       store.markUncertain(cardIntentId, { error: error?.message || 'send_error' });
       return { state: 'uncertain', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: { state: 'uncertain', intent: store.getIntent(cardIntentId) } };

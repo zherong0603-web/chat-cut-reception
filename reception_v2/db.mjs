@@ -129,8 +129,9 @@ class V2Database {
 
   close() { this.db.close(); }
 
-  ingestInbound({ accountId, conversationId, eventId, text, platformTimeMs, detectedAtMs = Date.now(), nickname = null, evidence = {}, type = 'CUSTOMER_MESSAGE' }) {
+  ingestInbound({ accountId, conversationId, eventId, text, platformTimeMs, detectedAtMs = Date.now(), nickname = null, evidence = {}, type = 'CUSTOMER_MESSAGE', minTurnOpenedAtMs = null }) {
     if (!accountId || !conversationId || !eventId || !Number.isFinite(platformTimeMs)) throw new TypeError('invalid_inbound');
+    if(minTurnOpenedAtMs!==null&&!Number.isFinite(minTurnOpenedAtMs))throw new TypeError('invalid_turn_window_start');
     const normalized = normalizeText(text);
     return transaction(this.db, () => {
       const existing = this.db.prepare('SELECT turn_id FROM turn_inbound_events WHERE event_id=?').get(eventId);
@@ -142,7 +143,8 @@ class V2Database {
       if (nickname) this.db.prepare('UPDATE conversations SET nickname=?,updated_at=? WHERE account_id=? AND conversation_id=?')
         .run(nickname, now, accountId, conversationId);
       let turn = this.db.prepare(`SELECT * FROM turns WHERE account_id=? AND conversation_id=?
-        AND quiet_until_ms>? ORDER BY opened_at_ms DESC LIMIT 1`).get(accountId, conversationId, platformTimeMs);
+        AND quiet_until_ms>? AND (? IS NULL OR opened_at_ms>=?) ORDER BY opened_at_ms DESC LIMIT 1`)
+        .get(accountId, conversationId, platformTimeMs, minTurnOpenedAtMs, minTurnOpenedAtMs);
       if (!turn) {
         const turnId = crypto.randomUUID();
         this.db.prepare(`INSERT INTO turns

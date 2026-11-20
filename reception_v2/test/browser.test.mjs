@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createReplySchedule } from '../reply-schedule.mjs';
 import { activeConversationRootLocator, modeMatchesScope, nativeMessageBelongsToIntent, nativeMessageMatchesOutboundIntent, selectVisibleConversation } from '../browser.mjs';
 const scope={accountId:'aaaaaaaaaaaaaaaaaaaaaaaa',conversationId:'bbbbbbbbbbbbbbbbbbbbbbbb'};
 test('mode must match exact active uid',()=>{
@@ -119,4 +120,25 @@ test('explicit user login opens an on-screen window while background defaults st
   const chromium={executablePath:()=>'/cache/chromium/Google Chrome for Testing'};
   const interactive=browserLaunchOptions({chromium,headless:false,visible:true,env:{}});
   assert.deepEqual(interactive,{headless:false,executablePath:'/cache/chromium/Google Chrome for Testing'});
+});
+
+test('native text DOM hook rejects a morning source when selector waits resume in the evening',async()=>{
+ let now=Date.parse('2026-11-21T08:59:59.900+08:00');const source=now,calls=[];
+ const button={count:async()=>1,isEnabled:async()=>{now=Date.parse('2026-11-21T18:00:00+08:00');return true;},click:async()=>calls.push('send')};
+ const root={count:async()=>1,locator:()=>({filter:()=>button})};const page={locator:selector=>selector==='#walle-ad'?{filter:()=>root}:{}};
+ const {clickConfiguredTextSend}=await import('../browser.mjs');
+ await assert.rejects(()=>clickConfiguredTextSend({page,scope,sourcePlatformTimeMs:source,replySchedule:createReplySchedule({now:()=>now}),now:()=>now}),/outside_inbound_reply_window/);assert.equal(calls.length,0);
+});
+
+for(const helper of ['sendConfiguredWeComCard','clickPreparedWeComCard'])test(`${helper} rejects a morning source at its final native button after an evening resume`,async()=>{
+ let now=Date.parse('2026-11-21T08:59:59.900+08:00');const source=now,calls=[];
+ const button={count:async()=>1,isEnabled:async()=>{now=Date.parse('2026-11-21T18:00:00+08:00');return true;},click:async()=>calls.push('send')};
+ const cardLocator={locator(){return this},count:async()=>1,hover:async()=>{},getByRole:()=>button};
+ const title={filter(){return this},waitFor:async()=>{},count:async()=>1,locator:()=>cardLocator};
+ const segment={filter(){return this},count:async()=>1,waitFor:async()=>{},click:async()=>{}};
+ const root={count:async()=>1,locator:selector=>selector.includes('.d-segment-item')?segment:title};
+ const page={locator:selector=>selector==='#walle-ad'?{filter:()=>root}:{}};
+ const fn=(await import('../browser.mjs'))[helper];
+ await assert.rejects(()=>fn({page,scope,sourcePlatformTimeMs:source,replySchedule:createReplySchedule({now:()=>now}),now:()=>now}),/outside_inbound_reply_window/);
+ assert.equal(calls.length,0);
 });
