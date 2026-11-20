@@ -101,3 +101,54 @@ test('median averages the two middle reply latencies',()=>{
     assert.equal(report.replies.median_initial_ms,5000);
   } finally {db.close();}
 });
+
+test('an empty local cohort during verified stale login is unknown platform traffic, not zero traffic',()=>{
+ const {db}=fixture();
+ try{
+  const accountId='a'.repeat(24);
+  const health={account_id:accountId,running:false,error:'auth_required',recorded_at_utc:'2026-11-20T02:00:00Z',last_successful_sidebar_read_at:'2026-11-16T11:03:21Z'};
+  const report=buildDailyReport(db,{accountId,date:'2026-11-19',health});
+  assert.equal(report.data_availability.status,'unavailable');
+  assert.equal(report.data_availability.business_totals_verified,false);
+  assert.equal(report.inbound.customers,0,'raw local counts remain available for audit');
+  const markdown=renderDailyReport(report);
+  assert.match(markdown,/无法统计/);
+  assert.match(markdown,/登录失效/);
+  assert.match(markdown,/本地记录/);
+  assert.doesNotMatch(markdown,/晚间进线：0 次，0 位客户/);
+  assert.doesNotMatch(markdown,/0\.0%/);
+  assert.match(markdown,/0\/0，无有效样本/);
+ }finally{db.close();}
+});
+
+test('current login failure cannot invalidate an earlier window that precedes the last successful read',()=>{
+ const {db}=fixture();
+ try{
+  const accountId='a'.repeat(24);
+  const health={account_id:accountId,error:'auth_required',recorded_at_utc:'2026-11-20T02:00:00Z',last_successful_sidebar_read_at:'2026-11-16T11:03:21Z'};
+  const report=buildDailyReport(db,{accountId,date:'2026-11-10',health});
+  assert.notEqual(report.data_availability.status,'unavailable');
+  assert.match(renderDailyReport(report),/晚间进线：2 次，2 位客户/);
+ }finally{db.close();}
+});
+
+test('health from another account or before window end is not evidence of a missing-data evening',()=>{
+ const {db}=fixture();
+ try{
+  const accountId='a'.repeat(24);
+  for(const health of [
+   {account_id:'b'.repeat(24),error:'auth_required',recorded_at_utc:'2026-11-20T02:00:00Z',last_successful_sidebar_read_at:'2026-11-16T11:03:21Z'},
+   {account_id:accountId,error:'auth_required',recorded_at_utc:'2026-11-19T10:30:00Z',last_successful_sidebar_read_at:'2026-11-16T11:03:21Z'},
+  ])assert.notEqual(buildDailyReport(db,{accountId,date:'2026-11-19',health}).data_availability.status,'unavailable');
+ }finally{db.close();}
+});
+
+test('an explicit never-read login failure also suppresses false zero business totals',()=>{
+ const {db}=fixture();
+ try{
+  const accountId='a'.repeat(24);
+  const report=buildDailyReport(db,{accountId,date:'2026-11-19',health:{account_id:accountId,error:'auth_required',recorded_at_utc:'2026-11-20T02:00:00Z',last_successful_sidebar_read_at:null}});
+  assert.equal(report.data_availability.status,'unavailable');
+  assert.match(renderDailyReport(report),/尚无成功读取记录/);
+ }finally{db.close();}
+});

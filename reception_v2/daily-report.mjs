@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path';
+import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { loadAccountConfig } from './account-config.mjs';
 
@@ -31,7 +32,19 @@ function unique(items,key='conversation_id'){return new Set(items.map(item=>item
 function platformTime(row){const receipt=evidence(row.evidence_json);return receipt?.verified===true&&Number.isFinite(receipt.platformTimeMs)?receipt.platformTimeMs:null;}
 function earliestAfter(rows,uid,timestamp,endMs,turnIds=null){let best=null;for(const row of rows){if(row.conversation_id!==uid||row.kind!=='text'||row.content===CARD_CLICK_ACK_TEXT||row.state!=='sent'||(turnIds&&!turnIds.has(row.turn_id)))continue;const at=platformTime(row);if(at==null||at<timestamp||at>=endMs)continue;if(best==null||at<best)best=at;}return best;}
 
-export function buildDailyReport(db,{accountId,date}) {
+function assessDataAvailability(health,accountId,startMs,endMs) {
+  const lastReadMs=Date.parse(health?.last_successful_sidebar_read_at);
+  const recordedMs=Date.parse(health?.recorded_at_utc);
+  const unavailable=health?.account_id===accountId && health.error==='auth_required'
+    && (health.last_successful_sidebar_read_at===null || (Number.isFinite(lastReadMs) && lastReadMs<startMs))
+    && Number.isFinite(recordedMs) && recordedMs>=endMs;
+  return {status:unavailable?'unavailable':'not_assessed',business_totals_verified:unavailable?false:null,
+    reason:unavailable?'auth_required_without_verified_window_read':'window_coverage_not_established',
+    last_successful_sidebar_read_at:health?.account_id===accountId?health.last_successful_sidebar_read_at??null:null,
+    health_recorded_at:health?.account_id===accountId?health.recorded_at_utc??null:null};
+}
+
+export function buildDailyReport(db,{accountId,date,health=null}) {
   if(!db||!accountId)throw new Error('report_database_and_account_required');
   const day=shanghaiDayRange(date);const startMs=day.startMs+EVENING_START_MS,endMs=day.endMs;
   const inboundRows=db.prepare("SELECT conversation_id,event_id,platform_time_ms FROM events WHERE account_id=? AND type='NEW_VISITOR' AND platform_time_ms>=? AND platform_time_ms<?").all(accountId,startMs,endMs);
@@ -58,6 +71,7 @@ export function buildDailyReport(db,{accountId,date}) {
   const uncertainCustomers=unique(outboxRows.filter(row=>row.state==='uncertain')),failedCustomers=unique(outboxRows.filter(row=>row.state==='failed')),confirmedCardCustomers=unique(outboxRows.filter(row=>row.kind==='card'&&row.state==='sent'));
   return {
     report_date:day.date,timezone:'Asia/Shanghai',window_local:'18:00:00-23:59:59',window_start_utc:new Date(startMs).toISOString(),window_end_utc:new Date(endMs).toISOString(),
+    data_availability:assessDataAvailability(health,accountId,startMs,endMs),
     inbound:{events:inboundRows.length,customers:inboundCustomers.size},
     openings:{customers:openedByCustomer.size,messages:cohortOpenedRows.length,all_window_customers:unique(customerMessageRows).size},
     leads:{customers:leadCustomers.size,wecom_added_customers:wecomCustomers.size,lead_submitted_customers:leadSubmittedCustomers.size,phone_or_wechat_customers:phoneWechatCustomers.size,sidebar_tag_only_customers:sidebarOnlyCustomers.size},
@@ -70,6 +84,7 @@ export function buildDailyReport(db,{accountId,date}) {
 }
 
 export function renderDailyReport(report) {
+  if(report.data_availability?.status==='unavailable')return renderUnavailableDailyReport(report);
   const r=report.replies;const openingRate=report.openings.customers>0?`${(r.confirmed_after_open_customers/report.openings.customers*100).toFixed(1)}%`:'无有效样本';
   return [
     `# 小红书晚间接待日报｜${report.report_date}`,
@@ -98,8 +113,43 @@ export function renderDailyReport(report) {
   ].join('\n');
 }
 
+function renderUnavailableDailyReport(report) {
+  const r=report.replies;
+  const lastRead=report.data_availability.last_successful_sidebar_read_at===null?'尚无成功读取记录'
+    :'北京时间 '+new Date(Date.parse(report.data_availability.last_successful_sidebar_read_at)+SHANGHAI_OFFSET_MS).toISOString().replace('T',' ').slice(0,19);
+  const rows=[
+    ['晚间进线',`${report.inbound.events} 次，${report.inbound.customers} 位客户`],
+    ['开口客户与消息',`${report.openings.customers} 位，${report.openings.messages} 条`],
+    ['有效留资',`${report.leads.customers} 位`],
+    ['已添加企微',`${report.leads.wecom_added_customers} 位`],
+    ['已验证手机或微信',`${report.leads.phone_or_wechat_customers} 位`],
+    ['真实提交留资卡',`${report.leads.lead_submitted_customers} 位`],
+    ['侧栏留资标签未核实',`${report.leads.sidebar_tag_only_customers} 位`],
+    ['企微卡点击',`${report.card_clicks.customers} 位，${report.card_clicks.events} 次`],
+    ['开口客户已确认回复',`${r.confirmed_after_open_customers}/${report.openings.customers}`],
+    ['开口后 3 秒内回复',displayRate(r.within_3s_after_open_customers,report.openings.customers)],
+    ['进线后 3 秒内首条回复',displayRate(r.within_3s_initial_customers,report.inbound.customers)],
+    ['开口后回复耗时中位数',r.median_after_open_ms==null?'无有效样本':`${r.median_after_open_ms} ms`],
+    ['进线后首条回复耗时中位数',r.median_initial_ms==null?'无有效样本':`${r.median_initial_ms} ms`],
+    ['待核实客户与失败客户',`${r.uncertain_customers} 位，${r.failed_customers} 位`],
+    ['已确认、未确认、失败发送',`${r.sent} 条，${r.uncertain} 条，${r.failed} 条`],
+  ];
+  return [
+    `# 小红书晚间接待日报｜${report.report_date}`,'',
+    `统计窗口：北京时间 ${report.window_local}。客户范围仍按该窗口 NEW_VISITOR 的客户 UID 去重。`,'',
+    '采集状态：登录失效，未取得统计窗口内成功读取消息的证据。平台真实进线、开口、留资和总体回复表现无法统计。',
+    `最后成功读取消息：${lastRead}。没有可用于核实本窗口的成功读取记录。`,'',
+    '| 指标 | 平台总体结论 | 本地记录（仅用于核对） |',
+    '| --- | --- | --- |',
+    ...rows.map(([label,value])=>`| ${label} | 无法统计 | ${value} |`),'',
+    '本地记录为零不能说明平台没有客户、没有留资或没有未回复。三秒回复率缺少有效样本时不计算百分比。登录恢复后的真实新增消息与平台记录需要另行核验。',
+    '留资仅统计本批客户的已验证资料；侧栏标签单列，未计入有效留资。JSON保留本地原始计数，并以 data_availability.business_totals_verified=false 标识平台业务总数不可核实。',
+  ].join('\n');
+}
+
 function argValue(args,flag,fallback=null){const i=args.indexOf(flag);return i>=0&&args[i+1]?args[i+1]:fallback;}
 if(import.meta.url===new URL(process.argv[1],'file:').href){
   const args=process.argv.slice(2);const account=loadAccountConfig({cwd:process.cwd(),env:process.env});const dbPath=path.resolve(argValue(args,'--db',path.join(account.runtimeDir,'reception-v2.sqlite3')));const date=argValue(args,'--date',previousShanghaiDate());const db=new DatabaseSync(dbPath,{readOnly:true});
-  try{const report=buildDailyReport(db,{accountId:account.accountId,date});console.log(args.includes('--json')?JSON.stringify(report,null,2):renderDailyReport(report));}finally{db.close();}
+  let health=null;try{health=JSON.parse(fs.readFileSync(path.join(path.dirname(dbPath),'reception-v2-health.json'),'utf8'));}catch{}
+  try{const report=buildDailyReport(db,{accountId:account.accountId,date,health});console.log(args.includes('--json')?JSON.stringify(report,null,2):renderDailyReport(report));}finally{db.close();}
 }

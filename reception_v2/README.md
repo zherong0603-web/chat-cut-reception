@@ -105,6 +105,8 @@ node reception_v2/daily-report.mjs --db .runtime/reception-v2.sqlite3 --account 
 
 统计口径固定为：先以该晚间 `NEW_VISITOR` 建立客户 UID cohort；开口只计算 cohort 内客户在窗口内的 `CUSTOMER_MESSAGE`；有效留资只认客户资料中已验证的 `wecom_added`、手机、微信或真实提交的留资卡，侧栏“留客资/留资客”标签单独列出，不计为有效留资。回复 3 秒率分别计算“首次开口到首条确认文字”和“首次进线到首条确认文字”。
 
+日报同时只读检查该数据库目录内的 `reception-v2-health.json`。同账号在统计窗口结束后的快照若仍为 `auth_required`，且最后成功读取早于窗口或明确从未成功读取，平台业务总数显示“无法统计”。本地计数仍保留用于核对，不能将其零值说成平台没有客户；JSON以 `data_availability.business_totals_verified=false` 标记该限制。其他情况标记覆盖范围尚未评估，不凭当前健康状态推断整晚均正常或均失效。
+
 客户资料面板必须等待 UID、资料区和信息来源区全部加载。UID 段可能同时出现“小红书号”和“UID”，只能取标签精确为 `UID:` 的字段。日报读取数据库时使用只读连接。
 
 自动迭代每次只处理日报中证据最强的一个瓶颈，先写回归测试，再改代码并运行全量测试。发送、严格回执、UNKNOWN 保护、企微卡身份和回复时间窗口不得放宽。
