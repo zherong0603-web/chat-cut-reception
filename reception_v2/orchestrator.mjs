@@ -66,7 +66,7 @@ export function createOrchestrator(deps) {
   const deferContact=row=>state.contactFailureUntil.set(row.uid,clock()+300_000);
   const clock=deps.now;
   const replyWindow=()=>deps.replySchedule?.state?.()||{allowed:true,timezone:'Asia/Shanghai',localDate:null,localTime:null,reason:'unrestricted'};
-  const rowReplyEligible=row=>{if(!deps.replySchedule)return true;const window=replyWindow();return window.allDay===true?isTodaySidebarTime(row.time,clock()):sidebarTimeInReplyWindow(row.time);};
+  const rowReplyEligible=row=>{if(!deps.replySchedule)return true;const window=replyWindow();return window.allDay===true?isTodaySidebarTime(row.time,clock()):sidebarTimeInReplyWindow(row.time,window.localTime??null);};
   const setBaseline=rows=>{state.seen=new Map((rows||[]).map(row=>[row.uid,fingerprint(row)]));state.replyCheckAt=new Map((rows||[]).filter(row=>row.needsReply===true).map(row=>[row.uid,clock()+1000]));};
   const sleep=deps.sleep||(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
   const stopping=()=>deps.isStopping?.()===true;
@@ -282,7 +282,7 @@ export function createOrchestrator(deps) {
 
   async function takeoverRows(sourceRows, { maxRows = Infinity, requireMarked = true } = {}) {
     const marked = requireMarked ? (sourceRows || []).filter(row => row.platformAiActive === true || (row.statusTags || []).includes('接待中')) : (sourceRows || []);
-    const rows = marked.filter(row => isRecentSidebarTime(row.time, clock())).slice(0, Math.max(0, maxRows));
+    const rows = marked.filter(row => rowReplyEligible(row) && isRecentSidebarTime(row.time, clock())).slice(0, Math.max(0, maxRows));
     const results = [], failed = [];
     for (const row of rows) {
       let lastError=null, succeeded=false;
@@ -351,7 +351,7 @@ export function createOrchestrator(deps) {
   async function pollOnce() {
     const sidebar = await deps.readSidebar();const window=replyWindow();
     if(!window.allowed){state.baselineReady=true;state.lastWindowAllowed=false;setBaseline(sidebar.rows||[]);return {processed:0,failed:[],successfulRead:true,reply_window:window};}
-    if(state.lastWindowAllowed===false){state.lastWindowAllowed=true;setBaseline(sidebar.rows||[]);return {processed:0,failed:[],successfulRead:true,reply_window:window};}
+    if(state.lastWindowAllowed===false)state.lastWindowAllowed=true;
     if (!state.baselineReady) return sweepVisibleOverdue();
     const failed=[];
     const candidates=(sidebar.rows||[]).filter(row=>{
@@ -378,13 +378,13 @@ export function createOrchestrator(deps) {
         failed.push({ uid: row.uid, error: error?.message || 'row_failed' });try{await enqueue({kind:'needs_operator',accountId:deps.accountId,conversationId:row.uid,customer:row.nickname||'当前客户',need:row.preview||'新消息',contact:'自动接待失败',completed:'本轮没有完成客户操作',next:'请人工查看这个客户',details:{phase:'poll_row_failed',error:String(error?.message||'row_failed').slice(0,160)}});}catch{}
       }
     }
-    const takeoverRowsDue=(sidebar.rows||[]).filter(row=>state.takeoverRetryAt.has(row.uid)&&state.takeoverRetryAt.get(row.uid)<=clock()).slice(0,5);
+    const takeoverRowsDue=(sidebar.rows||[]).filter(row=>rowReplyEligible(row)&&state.takeoverRetryAt.has(row.uid)&&state.takeoverRetryAt.get(row.uid)<=clock()).slice(0,5);
     if(takeoverRowsDue.length){
       const takeover=await takeoverRows(takeoverRowsDue,{maxRows:5,requireMarked:false});
       for(const failure of takeover.failed)failed.push({uid:failure.uid,error:failure.error});
       if(takeover.processed)return{processed:takeover.processed,takeover,failed,successfulRead:true,reply_window:window};
     }
-    const allRows=(sidebar.rows||[]).filter(row=>isTodaySidebarTime(row.time,clock())&&contactReady(row));
+    const allRows=(sidebar.rows||[]).filter(row=>rowReplyEligible(row)&&isTodaySidebarTime(row.time,clock())&&contactReady(row));
     if(allRows.length && clock()>=state.nextContactScanAt){const row=allRows[state.contactCursor++%allRows.length];state.nextContactScanAt=clock()+1000;try{const result=await processRow(row,{contactOnly:true});state.contactFailureUntil.delete(row.uid);return {processed:result.state===ConversationState.CONTACT_OBTAINED?1:0,contact_scan:result, failed, successfulRead:true,reply_window:window};}catch(error){deferContact(row);failed.push({uid:row.uid,error:error?.message||'contact_scan_failed'});try{await enqueue({kind:'needs_operator',accountId:deps.accountId,conversationId:row.uid,customer:row.nickname||'当前客户',need:row.preview||'新消息',contact:'自动接待失败',completed:'本轮没有完成客户操作',next:'请人工查看这个客户',details:{phase:'poll_contact_scan_failed',error:String(error?.message||'contact_scan_failed').slice(0,160)}});}catch{}}}
     return { processed: 0, failed, successfulRead: true, reply_window:window };
   }

@@ -1,6 +1,7 @@
 export const REPLY_TIME_ZONE='Asia/Shanghai';
-export const REPLY_WINDOW_START='19:00:00';
+export const REPLY_WINDOW_START='07:00:00';
 export const REPLY_WINDOW_LAST_SEND='23:59:29';
+export const REPLY_WINDOW_DESCRIPTION='每天07:00至09:00、18:00至24:00（23:59:30起停止提交新消息）';
 const formatter=new Intl.DateTimeFormat('en-GB',{timeZone:REPLY_TIME_ZONE,hourCycle:'h23',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
 
 function shanghaiParts(nowMs=Date.now()){
@@ -14,7 +15,7 @@ export function replyWindowState(nowMs=Date.now(),{overrideDates=[]}={}){
   const localTime=`${pad(p.hour)}:${pad(p.minute)}:${pad(p.second)}`;
   const seconds=p.hour*3600+p.minute*60+p.second,cutoff=seconds>=24*3600-30;
   const override=overrideDates.includes(localDate);
-  const allowed=override?!cutoff:seconds>=19*3600&&!cutoff;
+  const allowed=override?!cutoff:replySegment(seconds)!==null;
   return {allowed,timezone:REPLY_TIME_ZONE,localDate,localTime,reason:override?(allowed?'date_override':'cutoff'):allowed?'open':cutoff?'cutoff':'closed',...(override?{allDay:true,overrideDate:localDate}:{})};
 }
 
@@ -22,8 +23,26 @@ export function createReplySchedule({now=Date.now,overrideDates=[]}={}){
   return Object.freeze({isAllowed:()=>replyWindowState(now(),{overrideDates}).allowed,state:()=>replyWindowState(now(),{overrideDates})});
 }
 
-export function sidebarTimeInReplyWindow(value){
+function replySegment(seconds){
+  if(seconds>=7*3600&&seconds<9*3600)return 'morning';
+  if(seconds>=18*3600&&seconds<24*3600-30)return 'evening';
+  return null;
+}
+
+function clockSeconds(value){
   const match=/^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(String(value||'').trim());
-  if(!match)return false;
-  const hour=Number(match[1]);return hour>=19&&hour<=23;
+  if(!match)return null;
+  const hour=Number(match[1]),minute=Number(match[2]),second=Number(match[3]||0);
+  if(hour>23||minute>59||second>59)return null;
+  return hour*3600+minute*60+second;
+}
+
+export function sidebarTimeInReplyWindow(value,currentLocalTime=null){
+  const seconds=clockSeconds(value);
+  if(seconds===null)return false;
+  const segment=replySegment(seconds);
+  if(segment===null)return false;
+  if(currentLocalTime===null)return true;
+  const currentSeconds=clockSeconds(currentLocalTime);
+  return currentSeconds!==null&&replySegment(currentSeconds)===segment;
 }

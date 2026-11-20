@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { loadAccountConfig } from './account-config.mjs';
 import { openInteractiveLogin } from './browser.mjs';
 import { acquireRuntimeLock, readHealth, readLockOwner } from './runtime.mjs';
+import { REPLY_WINDOW_DESCRIPTION } from './reply-schedule.mjs';
 
 export async function reloginReception({account, service, login = openInteractiveLogin, signal}) {
   const wasLoaded = await service.isLoaded();
@@ -92,7 +93,7 @@ async function main() {
   console.log(`请在即将打开的专用浏览器中，扫码或用手机号登录“${account.accountName}”。请保留此窗口，完成后会自动检查接待。`);
   try {
     const result = await reloginReception({account, service, signal: controller.signal});
-    if (result.healthy) console.log('重新登录成功，已确认接待程序连续读取消息。仍按原定 19:00 至 24:00 回复。');
+    if (result.healthy) console.log('重新登录成功，已确认接待程序连续读取消息。回复时段：'+REPLY_WINDOW_DESCRIPTION+'。');
     else if (!result.serviceResumed) console.log('登录已保存。原接待服务未启用，已保留原来的停止状态。');
     else { console.error('登录已保存，接待程序已恢复启动，但尚未验证连续读取成功。请把此结果告诉 Codex。'); process.exitCode = 2; }
   } finally {

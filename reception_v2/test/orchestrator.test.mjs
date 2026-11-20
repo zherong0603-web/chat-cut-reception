@@ -157,13 +157,13 @@ test('outside reply hours reads health but creates no intent or conversation int
 });
 
 test('opening the reply window does not backfill off-hours rows',async()=>{
-  let allowed=false;const rows=[{uid:u1,nickname:'甲',needsReply:true,preview:'旧消息',time:'18:59:00'}];
+  let allowed=false;const rows=[{uid:u1,nickname:'甲',needsReply:true,preview:'旧消息',time:'17:59:00'}];
   const f=fixture({rows});const o=createOrchestrator({...f.orchestrator.deps,readSidebar:async()=>({rows}),replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
-  try{await o.pollOnce();allowed=true;const opened=await o.pollOnce();assert.equal(opened.processed,0);assert.equal(f.store.listTurns(accountId,u1).length,0);rows[0]={...rows[0],preview:'新消息',time:'19:01:00'};const fresh=await o.pollOnce();assert.equal(fresh.processed,1);assert.equal(f.store.listTurns(accountId,u1).length,1);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+  try{await o.pollOnce();allowed=true;const opened=await o.pollOnce();assert.equal(opened.processed,0);assert.equal(f.store.listTurns(accountId,u1).length,0);rows[0]={...rows[0],preview:'新消息',time:'18:01:00'};const fresh=await o.pollOnce();assert.equal(fresh.processed,1);assert.equal(f.store.listTurns(accountId,u1).length,1);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
-test('startup during reply hours ignores sidebar rows timestamped before 19:00',async()=>{
-  const now=new Date(2026,9,28,20,0,0).getTime();const f=fixture({rows:[{uid:u1,nickname:'甲',needsReply:true,preview:'旧消息',time:'18:59:59'}]});let selections=0;
+test('startup during reply hours ignores sidebar rows timestamped before 18:00',async()=>{
+  const now=new Date(2026,9,28,20,0,0).getTime();const f=fixture({rows:[{uid:u1,nickname:'甲',needsReply:true,preview:'旧消息',time:'17:59:59'}]});let selections=0;
   const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:{isAllowed:()=>true,state:()=>({allowed:true,reason:'open'})},selectConversation:async uid=>{selections++;return f.scopeFor(uid)}});
   try{const result=await o.pollOnce();assert.equal(result.processed,0);assert.equal(selections,0);assert.equal(f.store.listTurns(accountId,u1).length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
@@ -193,10 +193,10 @@ test('obvious peer profile cannot obtain a normal greeting or WeCom card',async(
   try{const result=await o.processRow({uid:u1,nickname:scope.nickname,needsReply:true});assert.equal(result.state,'stopped');assert.equal(f.state.calls.filter(x=>x==='card-send').length,0);assert.match(f.state.calls.find(x=>x.startsWith('fill:')),/同行|合作/);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
-test('a message change between closed polling and 19:00 is not backfilled',async()=>{
+test('a message change between closed polling and 18:00 is not backfilled',async()=>{
   let allowed=false;const rows=[{uid:u1,nickname:'甲',needsReply:true,preview:'18:30之前',time:'18:30:00'}];
   const f=fixture({rows});const o=createOrchestrator({...f.orchestrator.deps,readSidebar:async()=>({rows}),replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
-  try{await o.pollOnce();rows[0]={...rows[0],preview:'18:59新消息',time:'18:59:00'};allowed=true;const opening=await o.pollOnce();assert.equal(opening.processed,0);const next=await o.pollOnce();assert.equal(next.processed,0);assert.equal(f.store.listTurns(accountId,u1).length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+  try{await o.pollOnce();rows[0]={...rows[0],preview:'18:59新消息',time:'17:59:00'};allowed=true;const opening=await o.pollOnce();assert.equal(opening.processed,0);const next=await o.pollOnce();assert.equal(next.processed,0);assert.equal(f.store.listTurns(accountId,u1).length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
 test('excluded refusal uncertainty never becomes a WeCom solicitation retry',async()=>{
@@ -230,4 +230,44 @@ test('all-day override allows ordinary morning rows and expires by schedule stat
   const now=new Date(2026,10,2,10,0,0).getTime();const f=fixture({rows:[{uid:u1,nickname:'真实卖家',needsReply:true,preview:'美国仓报价',time:'10:00:00'}]});
   const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:{isAllowed:()=>true,state:()=>({allowed:true,allDay:true,overrideDate:'2026-11-02',reason:'date_override'})}});
   try{const result=await o.pollOnce();assert.equal(result.processed,1);assert.equal(f.store.listTurns(accountId,u1).length,1);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('evening startup does not take over or reply to a morning conversation',async()=>{
+ const {createReplySchedule}=await import('../reply-schedule.mjs');
+ const now=Date.parse('2026-11-21T18:10:00+08:00');
+ const f=fixture({rows:[{uid:u1,nickname:'测试客户',needsReply:true,preview:'早上的消息',time:'08:30:00'}]});let selections=0;
+ const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:createReplySchedule({now:()=>now}),selectConversation:async uid=>{selections++;return f.scopeFor(uid)}});
+ try{const result=await o.pollOnce();assert.equal(result.processed,0);assert.equal(selections,0);assert.equal(f.state.calls.length,0);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('new morning and 18:00 customer openings enter the existing reception path',async()=>{
+ const {createReplySchedule}=await import('../reply-schedule.mjs');
+ for(const time of ['07:10:00','18:10:00']){
+  const now=Date.parse(`2026-11-21T${time}+08:00`);
+  const f=fixture({rows:[{uid:u1,nickname:'测试客户',needsReply:true,preview:'咨询美国仓',time}]});
+  const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:createReplySchedule({now:()=>now})});
+  try{const result=await o.pollOnce();assert.equal(result.processed,1,time);assert.equal(f.state.calls.filter(x=>x==='text-send').length,1,time);}
+  finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+ }
+});
+
+test('second evening poll cannot submit an acknowledgment for a morning card click',async()=>{
+ const {createReplySchedule}=await import('../reply-schedule.mjs');
+ const now=Date.parse('2026-11-21T18:10:00+08:00');
+ const rows=[{uid:u1,nickname:'测试客户',needsReply:false,preview:'对方已点击你的企业微信联系卡',time:'08:30:00'}];
+ const f=fixture({rows});let selections=0;
+ const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,replySchedule:createReplySchedule({now:()=>now}),selectConversation:async uid=>{selections++;return f.scopeFor(uid)}});
+ try{await o.pollOnce();await o.pollOnce();assert.equal(selections,0);assert.equal(f.state.calls.length,0);assert.equal(f.store.listTurns(accountId,u1).length,0);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('the first open poll responds to a customer arriving exactly at 07:00 or 18:00',async()=>{
+ const {createReplySchedule}=await import('../reply-schedule.mjs');
+ for(const start of ['07:00:00','18:00:00']){
+  let now=Date.parse(`2026-11-21T${start}+08:00`)-1000;let rows=[];
+  const f=fixture({rows});const o=createOrchestrator({...f.orchestrator.deps,now:()=>now,readSidebar:async()=>({rows}),replySchedule:createReplySchedule({now:()=>now})});
+  try{await o.pollOnce();now+=1000;rows=[{uid:u1,nickname:'测试客户',needsReply:false,preview:'咨询美国仓',time:start}];const result=await o.pollOnce();assert.equal(result.processed,1,start);assert.equal(f.state.calls.filter(x=>x==='text-send').length,1,start);}
+  finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+ }
 });
