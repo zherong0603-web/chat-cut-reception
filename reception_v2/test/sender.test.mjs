@@ -225,3 +225,47 @@ for(const kind of ['text','pair'])test(`a ${kind} DOM fill rejected after a cros
  }
  finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
+
+test('an already observed strict receipt is reconciled before any refresh',async()=>{
+ const f=fixture();f.browser.state.manual=true;let refreshes=0;
+ f.browser.waitForReceipt=async()=>({serverStatus:'pending',observedAtMs:2200});
+ f.browser.peekReceipt=intent=>({serverStatus:'confirmed',accountId,conversationId,content:intent.content,type:'TEXT',platformTimeMs:2100,observedAtMs:2600,senderId:accountId,receiverId:conversationId,direction:'OUTBOUND',nativeId:`id_${accountId}.${conversationId}.cached`});
+ f.browser.refreshConversation=async()=>{refreshes++;};
+ const intent=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'});
+ try{const result=await f.sender.sendText(intent.intentId,f.scope,1000);assert.equal(result.state,'sent');assert.equal(refreshes,0);assert.equal(result.intent.payload.observedAtMs,2600);assert.equal(f.browser.calls.filter(x=>x==='text').length,1);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('one pair refresh confirms both receipts without a second card reload or delayed persistence',async()=>{
+ let clock=2000,fresh=false,refreshes=0;const writes=[];
+ const f=fixture({senderOptions:{now:()=>clock}});f.browser.state.manual=true;
+ f.browser.refreshConversation=async()=>{refreshes++;clock+=2000;fresh=true;};
+ const receipt=intent=>({serverStatus:'confirmed',accountId,conversationId,content:intent.content,type:intent.kind==='card'?'CARD':'TEXT',cardTitle:intent.kind==='card'?'企微_运去哪海外仓（企微）':null,platformTimeMs:2100,observedAtMs:4000,senderId:accountId,receiverId:conversationId,direction:'OUTBOUND',nativeId:`id_${accountId}.${conversationId}.${intent.kind}`});
+ f.browser.peekReceipt=intent=>fresh?receipt(intent):{serverStatus:'pending',observedAtMs:clock};
+ f.browser.waitForReceipt=async intent=>fresh?receipt(intent):{serverStatus:'pending',observedAtMs:2200};
+ const reconcile=f.store.markReconciledSent.bind(f.store);f.store.markReconciledSent=(id,evidence)=>{writes.push({kind:f.store.getIntent(id).kind,at:clock});return reconcile(id,evidence);};
+ const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'}),card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+ try{const result=await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,1000);assert.equal(result.state,'sent');assert.equal(refreshes,1);assert.deepEqual(writes.map(row=>row.at),[4000,4000]);assert.equal(result.card.intent.payload.observedAtMs,4000);assert.equal(f.browser.calls.filter(x=>x==='text').length,1);assert.equal(f.browser.calls.filter(x=>x==='click-card').length,1);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a missing card uses at most two shared refreshes and preserves its original uncertain intent',async()=>{
+ const f=fixture();f.browser.state.manual=true;let fresh=false,refreshes=0;
+ f.browser.refreshConversation=async()=>{fresh=true;refreshes++;};
+ const receipt=intent=>fresh&&intent.kind==='text'?{serverStatus:'confirmed',accountId,conversationId,content:intent.content,type:'TEXT',platformTimeMs:2100,observedAtMs:2600,senderId:accountId,receiverId:conversationId,direction:'OUTBOUND',nativeId:`id_${accountId}.${conversationId}.text`}:{serverStatus:'pending',observedAtMs:2600};
+ f.browser.peekReceipt=receipt;f.browser.waitForReceipt=async intent=>receipt(intent);
+ const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'}),card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+ try{const result=await f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,1000);assert.equal(refreshes,2);assert.equal(result.text.state,'sent');assert.equal(f.store.getIntent(card.intentId).state,'uncertain');assert.equal(f.store.listIntents(f.turn.turnId).length,2);assert.equal(f.browser.calls.filter(x=>x==='click-card').length,1);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a confirmed initial text is persisted while its pair card is still awaiting a receipt',async()=>{
+ const f=fixture();f.browser.state.manual=true;let releaseCard,signalText;
+ const cardPending=new Promise(resolve=>{releaseCard=resolve;}),textObserved=new Promise(resolve=>{signalText=resolve;});
+ const receipt=intent=>({serverStatus:'confirmed',accountId,conversationId,content:intent.content,type:intent.kind==='card'?'CARD':'TEXT',cardTitle:intent.kind==='card'?'企微_运去哪海外仓（企微）':null,platformTimeMs:2100,observedAtMs:2200,senderId:accountId,receiverId:conversationId,direction:'OUTBOUND',nativeId:`id_${accountId}.${conversationId}.${intent.kind}`});
+ f.browser.waitForReceipt=async intent=>{if(intent.kind==='card')await cardPending;else signalText();return receipt(intent);};
+ const text=f.store.createIntent({turnId:f.turn.turnId,kind:'text',content:'你好'}),card=f.store.createIntent({turnId:f.turn.turnId,kind:'card',payload:{cardTitle:'企微_运去哪海外仓（企微）'}});
+ const sending=f.sender.sendTextAndCard(text.intentId,card.intentId,f.scope,1000);
+ try{await textObserved;await new Promise(resolve=>setImmediate(resolve));assert.equal(f.store.getIntent(text.intentId).state,'sent');assert.equal(f.store.getIntent(card.intentId).state,'sending');}
+ finally{releaseCard();await sending;f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});

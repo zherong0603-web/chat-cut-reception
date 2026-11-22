@@ -65,6 +65,19 @@ test('native card history uses the configured account card identity',()=>{
   assert.equal(nativeMessageMatchesOutboundIntent(row,intent,2000),false);
 });
 
+for(const field of ['contentType','id','csaAccountNo','name','corpName'])test(`a matching card title cannot bypass a wrong native ${field}`,()=>{
+ const card={title:'企微_测试仓（企微）',visibleName:'测试仓（企微）',id:'card-123',csaAccountNo:'csa-456',corpName:'@测试公司'};
+ const content={contentType:'COMMERCIAL_BUSINESS_CARD',id:card.id,csaAccountNo:card.csaAccountNo,name:card.visibleName,corpName:card.corpName,title:card.title,[field]:'wrong'};
+ const row={sixin_message:{id:`${scope.accountId}.${scope.conversationId}.card-1`,sender_id:scope.accountId,receiver_id:scope.conversationId,message_type:'CARD',created_at:2100,content:JSON.stringify(content)},message_extension:{customer_user_id:scope.conversationId}};
+ assert.equal(nativeMessageMatchesOutboundIntent(row,{...scope,kind:'card'},2000,card),false);
+});
+
+test('plain card title text is insufficient native card identity',()=>{
+ const card={title:'企微_测试仓（企微）',visibleName:'测试仓（企微）',id:'card-123',csaAccountNo:'csa-456',corpName:'@测试公司'};
+ const row={sixin_message:{id:`${scope.accountId}.${scope.conversationId}.card-1`,sender_id:scope.accountId,receiver_id:scope.conversationId,message_type:'CARD',created_at:2100,content:card.title},message_extension:{customer_user_id:scope.conversationId}};
+ assert.equal(nativeMessageMatchesOutboundIntent(row,{...scope,kind:'card'},2000,card),false);
+});
+
 test('configured card sender has no config shadowing and clicks the exact native card button',async()=>{
   const cardConfig={title:'企微_账号B（企微）',visibleName:'账号B（企微）',id:'100200300',csaAccountNo:'9988776655',corpName:'@账号B企业'};
   const calls=[];const button={count:async()=>1,isEnabled:async()=>true,click:async()=>calls.push('send')};

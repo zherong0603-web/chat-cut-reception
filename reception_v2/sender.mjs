@@ -61,24 +61,53 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     return { state: 'sent', intent: result, withinTwoSeconds: postedMs <= 2000, withinThreeSeconds: postedMs <= 3000, postedMs, confirmedMs: confirmationMs };
   }
 
-  async function retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial) {
-    if (initial?.state !== 'uncertain' || typeof browser.refreshConversation !== 'function') return initial;
+  function reconcileReceipt(intentId,sourcePlatformTimeMs,startedAtMs,receipt,verificationAttempt){
+    const intent=store.getIntent(intentId);
+    if(!verifyNativeHistory(intent,receipt,sourcePlatformTimeMs,startedAtMs,card))return null;
+    const postedMs=receipt.platformTimeMs-sourcePlatformTimeMs,confirmationMs=receipt.observedAtMs-sourcePlatformTimeMs;
+    const reconciled=store.markReconciledSent(intentId,{
+      ...receipt,verified:true,reconciled:true,verificationAttempt,
+      visibleElapsedMs:receipt.visibleAtMs?receipt.visibleAtMs-sourcePlatformTimeMs:null,
+      [`${intent.kind}PostedMs`]:postedMs,[`${intent.kind}ConfirmedMs`]:confirmationMs,withinTwoSeconds:postedMs<=2000,withinThreeSeconds:postedMs<=3000,
+    });
+    return {state:'sent',intent:reconciled,withinTwoSeconds:postedMs<=2000,withinThreeSeconds:postedMs<=3000,postedMs,confirmedMs:confirmationMs};
+  }
+
+  async function cachedVerification(intentId,sourcePlatformTimeMs,startedAtMs,verificationAttempt){
+    if(typeof browser.peekReceipt!=='function')return null;
+    try{return reconcileReceipt(intentId,sourcePlatformTimeMs,startedAtMs,await browser.peekReceipt(store.getIntent(intentId),{startedAtMs}),verificationAttempt);}
+    catch{return null;}
+  }
+
+  async function retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial,receiptBudgetDeadlineMs) {
+    if (initial?.state !== 'uncertain') return initial;
+    const cached=await cachedVerification(intentId,sourcePlatformTimeMs,startedAtMs,2);if(cached)return cached;
+    if(typeof browser.refreshConversation!=='function')return initial;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try { await browser.refreshConversation(scope); }
       catch { continue; }
       const intent = store.getIntent(intentId);
-      const receipt = await browser.waitForReceipt(intent, { startedAtMs, timeoutMs: 2500 });
-      if (!verifyNativeHistory(intent, receipt, sourcePlatformTimeMs, startedAtMs, card)) continue;
-      const postedMs = receipt.platformTimeMs - sourcePlatformTimeMs;
-      const confirmationMs = receipt.observedAtMs - sourcePlatformTimeMs;
-      const reconciled = store.markReconciledSent(intentId, {
-        ...receipt, verified: true, reconciled: true, verificationAttempt: attempt + 1,
-        visibleElapsedMs: receipt.visibleAtMs ? receipt.visibleAtMs - sourcePlatformTimeMs : null,
-        [`${intent.kind}PostedMs`]: postedMs, [`${intent.kind}ConfirmedMs`]: confirmationMs, withinTwoSeconds: postedMs <= 2000, withinThreeSeconds: postedMs <= 3000,
-      });
-      return { state: 'sent', intent: reconciled, withinTwoSeconds: postedMs <= 2000, withinThreeSeconds: postedMs <= 3000, postedMs, confirmedMs: confirmationMs };
+      const receipt = await browser.waitForReceipt(intent, { startedAtMs, timeoutMs: 2500,receiptGroupId:intentId,receiptBudgetDeadlineMs });
+      const result=reconcileReceipt(intentId,sourcePlatformTimeMs,startedAtMs,receipt,attempt+1);if(result)return result;
+      const cached=await cachedVerification(intentId,sourcePlatformTimeMs,startedAtMs,attempt+1);if(cached)return cached;
     }
     return initial;
+  }
+
+  async function retryPairVerification(items,scope,sourcePlatformTimeMs,receiptGroupId,receiptBudgetDeadlineMs){
+    const pending=()=>items.filter(item=>item.result?.state==='uncertain');
+    await Promise.all(pending().map(async item=>{const cached=await cachedVerification(item.id,sourcePlatformTimeMs,item.startedAtMs,2);if(cached)item.result=cached;}));
+    if(typeof browser.refreshConversation!=='function')return items;
+    for(let attempt=1;attempt<=2&&pending().length;attempt++){
+      try{await browser.refreshConversation(scope);}catch{continue;}
+      await Promise.all(pending().map(async item=>{
+        const cached=await cachedVerification(item.id,sourcePlatformTimeMs,item.startedAtMs,attempt+1);
+        if(cached){item.result=cached;return;}
+        const receipt=await browser.waitForReceipt(store.getIntent(item.id),{startedAtMs:item.startedAtMs,timeoutMs:2500,receiptGroupId,receiptBudgetDeadlineMs});
+        const result=reconcileReceipt(item.id,sourcePlatformTimeMs,item.startedAtMs,receipt,attempt+1);if(result)item.result=result;
+      }));
+    }
+    return items;
   }
 
   async function assertSafeMode(scope) {
@@ -114,9 +143,10 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     store.markSending(intentId, startedAtMs);
     try {
       await browser.clickTextSend(scope,sourcePlatformTimeMs);
-      const receipt = await browser.waitForReceipt(store.getIntent(intentId), { startedAtMs });
+      const receiptBudgetDeadlineMs=now()+2000;
+      const receipt = await browser.waitForReceipt(store.getIntent(intentId), { startedAtMs,receiptGroupId:intentId,receiptBudgetDeadlineMs });
       const initial = await finalize(intentId, scope, sourcePlatformTimeMs, receipt, startedAtMs);
-      return await retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial);
+      return await retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial,receiptBudgetDeadlineMs);
     } catch (error) {
       if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};
       if (isPlatformBlock(error)) return { state: 'send_blocked', intent: store.markFailed(intentId, 'platform_blocked') };
@@ -137,9 +167,10 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     store.markSending(intentId, startedAtMs);
     try {
       await browser.sendCard(scope,sourcePlatformTimeMs);
-      const receipt = await browser.waitForReceipt(store.getIntent(intentId), { startedAtMs });
+      const receiptBudgetDeadlineMs=now()+2000;
+      const receipt = await browser.waitForReceipt(store.getIntent(intentId), { startedAtMs,receiptGroupId:intentId,receiptBudgetDeadlineMs });
       const initial = await finalize(intentId, scope, sourcePlatformTimeMs, receipt, startedAtMs);
-      return await retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial);
+      return await retryVerification(intentId, scope, sourcePlatformTimeMs, startedAtMs, initial,receiptBudgetDeadlineMs);
     } catch (error) {
       if(isOutsideReplyWindow(error))return {state:'outside_reply_hours',intent:store.markFailed(intentId,outsideFailureReason(error))};
       if (isPlatformBlock(error)) return { state: 'send_blocked', intent: store.markFailed(intentId, 'platform_blocked') };
@@ -193,16 +224,13 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
       store.markUncertain(cardIntentId, { error: error?.message || 'send_error' });
       return { state: 'uncertain', text: { state: 'uncertain', intent: store.getIntent(textIntentId) }, card: { state: 'uncertain', intent: store.getIntent(cardIntentId) } };
     }
-    const [textReceipt, cardReceipt] = await Promise.all([
-      browser.waitForReceipt(store.getIntent(textIntentId), { startedAtMs: textStartedAtMs }),
-      browser.waitForReceipt(store.getIntent(cardIntentId), { startedAtMs: cardStartedAtMs }),
-    ]);
+    const receiptGroupId=`${textIntentId}:${cardIntentId}`,receiptBudgetDeadlineMs=now()+2000;
     let [text, card] = await Promise.all([
-      finalize(textIntentId, scope, sourcePlatformTimeMs, textReceipt, textStartedAtMs),
-      finalize(cardIntentId, scope, sourcePlatformTimeMs, cardReceipt, cardStartedAtMs),
+      (async()=>finalize(textIntentId,scope,sourcePlatformTimeMs,await browser.waitForReceipt(store.getIntent(textIntentId),{startedAtMs:textStartedAtMs,receiptGroupId,receiptBudgetDeadlineMs}),textStartedAtMs))(),
+      (async()=>finalize(cardIntentId,scope,sourcePlatformTimeMs,await browser.waitForReceipt(store.getIntent(cardIntentId),{startedAtMs:cardStartedAtMs,receiptGroupId,receiptBudgetDeadlineMs}),cardStartedAtMs))(),
     ]);
-    text = await retryVerification(textIntentId, scope, sourcePlatformTimeMs, textStartedAtMs, text);
-    card = await retryVerification(cardIntentId, scope, sourcePlatformTimeMs, cardStartedAtMs, card);
+    const reconciled=await retryPairVerification([{id:textIntentId,startedAtMs:textStartedAtMs,result:text},{id:cardIntentId,startedAtMs:cardStartedAtMs,result:card}],scope,sourcePlatformTimeMs,receiptGroupId,receiptBudgetDeadlineMs);
+    [text,card]=reconciled.map(item=>item.result);
     const withinTwoSeconds = text.state === 'sent' && card.state === 'sent' && text.withinTwoSeconds === true && card.withinTwoSeconds === true;
     const withinThreeSeconds = text.state === 'sent' && card.state === 'sent' && text.withinThreeSeconds === true && card.withinThreeSeconds === true;
     return { state: text.state === 'sent' && card.state === 'sent' ? 'sent' : 'uncertain', text, card, withinTwoSeconds, withinThreeSeconds };

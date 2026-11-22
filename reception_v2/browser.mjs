@@ -7,6 +7,15 @@ import { acceptsAccountTitle } from './sidebar.mjs';
 import { assertReplySourceWindow } from './reply-schedule.mjs';
 const MESSAGE_ENDPOINT = '/api-sxt/edith/chatline/msg';
 
+function nativeHistoryRequestScope(request,expectedUid=null){
+  try{
+    if(request?.method()!=='GET')return null;
+    const url=new URL(request.url()),uids=url.searchParams.getAll('customer_user_id');
+    if(url.origin!=='https://sxt.xiaohongshu.com'||url.pathname!==MESSAGE_ENDPOINT||url.username||url.password||url.hash||url.href.includes('#')||uids.length!==1||!/^[a-f0-9]{24}$/.test(uids[0])||(expectedUid!==null&&uids[0]!==expectedUid))return null;
+    return {url:url.href,uid:uids[0]};
+  }catch{return null;}
+}
+
 export function nativeMessageBelongsToIntent(id, intent) {
   const value = String(id || '');
   const prefixes = [`${intent.accountId}.${intent.conversationId}.`, `${intent.conversationId}.${intent.accountId}.`];
@@ -23,7 +32,6 @@ export function nativeMessageMatchesOutboundIntent(row, intent, startedAtMs, car
   if (intent.kind === 'card') {
     if (type !== 'CARD') return false;
     const content=String(message.content||'');
-    if(content.includes(card.title))return true;
     try{const value=JSON.parse(content);return value.contentType==='COMMERCIAL_BUSINESS_CARD'&&value.id===card.id&&value.csaAccountNo===card.csaAccountNo&&value.name===card.visibleName&&value.corpName===card.corpName;}catch{return false;}
   }
   return type === 'TEXT' && String(message.content || '').trim() === String(intent.content || '').trim();
@@ -93,18 +101,139 @@ export async function clickConfiguredTextSend({ page, scope, assertActive = asyn
   await button.click({timeout:1000});await assertActive(scope);
 }
 
-function deepFindMessages(value) {
-  const found = [];
-  const seen = new Set();
-  function walk(node, depth = 0) {
-    if (!node || depth > 8 || seen.has(node)) return;
-    if (typeof node !== 'object') return;
-    seen.add(node);
-    if (node.sixin_message && typeof node.sixin_message === 'object') found.push(node);
-    for (const child of Object.values(node)) walk(child, depth + 1);
+export function createNativeReceiptReader({accountId,card=DEFAULT_CARD,nativeRecords,request=null,isActive=()=>true,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}){
+  const inFlight=new Map(),groups=new Map();let nextRequestId=0;
+  const pending=reason=>({serverStatus:'pending',observedAtMs:now(),...(reason?{reason}:{})});
+  const validIntent=intent=>intent?.accountId===accountId&&/^[a-f0-9]{24}$/.test(intent?.conversationId||'')&&['text','contact_fallback','card'].includes(intent?.kind);
+  const validEnvelope=body=>body?.success===true&&body?.code===0&&Array.isArray(body?.data?.messages);
+  async function withinBudget(operation,deadlineMs){
+    let timer;
+    try{return await Promise.race([operation,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('native_history_budget_expired')),Math.max(1,deadlineMs-now()));})]);}
+    finally{clearTimeout(timer);}
   }
-  walk(value);
-  return found;
+  async function waitForSharedRead(operation,deadlineMs){
+    if(now()>=deadlineMs)return {status:'pending',reason:'native_history_wait_budget_expired'};
+    try{const result=await withinBudget(operation,deadlineMs);return now()>=deadlineMs?{status:'pending',reason:'native_history_wait_budget_expired'}:result;}
+    catch{return {status:'pending',reason:'native_history_wait_budget_expired'};}
+  }
+
+  function peekReceipt(intent,{startedAtMs=0}={}){
+    if(!isActive())return pending('native_transport_closed');
+    if(!validIntent(intent)||!Number.isFinite(startedAtMs)||startedAtMs<=0||startedAtMs>now())return pending('native_receipt_scope_invalid');
+    const matches=new Map(),signatures=new Map(),conflicting=new Set();
+    const expectedId=intent.payload?.nativeId||intent.payload?.receipt?.nativeId||null;
+    for(const record of nativeRecords){
+      if(record.status!==200||record.responseOk!==true||!validEnvelope(record.body)||record.queryUserIds?.length!==1||record.queryUserIds[0]!==intent.conversationId||
+          !Number.isFinite(record.requestStartedAtMs)||record.requestStartedAtMs<startedAtMs||!Number.isFinite(record.receivedAtMs)||record.receivedAtMs<record.requestStartedAtMs||record.receivedAtMs>now())continue;
+      if(record.source!=='native_history_get'&&!nativeHistoryRequestScope(record.request,intent.conversationId))continue;
+      for(const row of record.body.data.messages){
+        if(!row||typeof row!=='object'||!row.sixin_message||typeof row.sixin_message!=='object')continue;
+        const message=row.sixin_message,nativeId='id_'+String(message.id),platformTimeMs=Number(message.created_at);
+        if(!nativeMessageBelongsToIntent(message.id,intent))continue;
+        if(expectedId&&nativeId!==expectedId)continue;
+        const type=message.message_type||message.type;let identity=String(message.content||'').trim();
+        if(type==='CARD'){try{const value=JSON.parse(identity);identity=[value?.contentType,value?.id,value?.csaAccountNo,value?.name,value?.corpName];}catch{identity=['invalid_card'];}}
+        const signature=JSON.stringify([message.sender_id,message.receiver_id,row.message_extension?.customer_user_id,message.direction??null,type,platformTimeMs,identity]);
+        if(signatures.has(nativeId)&&signatures.get(nativeId)!==signature)conflicting.add(nativeId);else signatures.set(nativeId,signature);
+        if(!nativeMessageMatchesOutboundIntent(row,intent,startedAtMs,card)||platformTimeMs>record.receivedAtMs+1000)continue;
+        const previous=matches.get(nativeId);
+        if(!previous||record.receivedAtMs<previous.observedAtMs)matches.set(nativeId,{observedAtMs:record.receivedAtMs,message});
+      }
+    }
+    const hasConflict=Array.from(matches.keys()).some(id=>conflicting.has(id));
+    if(matches.size!==1||hasConflict)return pending(matches.size>1||hasConflict?'native_receipt_ambiguous':undefined);
+    const [nativeId,match]=matches.entries().next().value,message=match.message;
+    return {serverStatus:'confirmed',accountId:intent.accountId,conversationId:intent.conversationId,
+      ...(intent.kind==='card'?{type:'CARD',cardTitle:card.title}:{type:'TEXT',content:intent.content}),
+      platformTimeMs:Number(message.created_at),observedAtMs:match.observedAtMs,visibleAtMs:null,
+      senderId:String(message.sender_id),receiverId:String(message.receiver_id),direction:'OUTBOUND',nativeId};
+  }
+
+  function observedTemplate(uid){
+    for(let i=nativeRecords.length-1;i>=0;i--){
+      const record=nativeRecords[i];if(record.status!==200||record.responseOk!==true||!validEnvelope(record.body)||record.queryUserIds?.length!==1||record.queryUserIds[0]!==uid||!record.request)continue;
+      const scope=nativeHistoryRequestScope(record.request,uid);if(scope)return {url:scope.url,request:record.request};
+    }
+    return null;
+  }
+
+  function groupFor(intent,{startedAtMs,timeoutMs,receiptGroupId,receiptBudgetDeadlineMs}){
+    if(!validIntent(intent)||!Number.isFinite(startedAtMs)||startedAtMs<=0||startedAtMs>now())return null;
+    const key=JSON.stringify([accountId,intent.conversationId,receiptGroupId||intent.intentId||`${intent.kind}:${startedAtMs}`]);
+    let group=groups.get(key);
+    if(!group){
+      for(const [other,item]of groups)if(item.deadlineMs<now())groups.delete(other);
+      const requestedDeadline=Number.isFinite(receiptBudgetDeadlineMs)?receiptBudgetDeadlineMs:now()+Math.min(2000,Math.max(0,timeoutMs));
+      const createdAtMs=now(),deadlineMs=Math.min(requestedDeadline,createdAtMs+2000);
+      group={deadlineMs,secondReadAtMs:createdAtMs+Math.min(1400,Math.floor(Math.max(0,deadlineMs-createdAtMs)*0.7)),requests:new Set()};groups.set(key,group);
+    }
+    return group;
+  }
+
+  async function readNativeHistory(intent,{startedAtMs=0,timeoutMs=2000,receiptGroupId=null,receiptBudgetDeadlineMs=null}={}){
+    const waiterDeadlineMs=now()+Math.max(0,timeoutMs);
+    const group=groupFor(intent,{startedAtMs,timeoutMs,receiptGroupId,receiptBudgetDeadlineMs});
+    if(!isActive())return {status:'pending',reason:'native_transport_closed'};
+    if(!group||!request?.get)return {status:'pending',reason:'native_history_unavailable'};
+    const deadlineMs=Math.min(group.deadlineMs,waiterDeadlineMs);
+    if(now()>=deadlineMs)return {status:'pending',reason:'native_history_budget_expired'};
+    const uid=intent.conversationId,existing=inFlight.get(uid);
+    if(existing){
+      if(existing.requestStartedAtMs===null||existing.requestStartedAtMs>=startedAtMs){
+        if(!group.requests.has(existing.id)&&group.requests.size>=2)return {status:'pending',reason:'native_history_attempt_limit'};
+        group.requests.add(existing.id);existing.requiredStartedAtMs=Math.max(existing.requiredStartedAtMs,startedAtMs);
+        return waitForSharedRead(existing.promise,deadlineMs);
+      }
+      const previous=await waitForSharedRead(existing.promise,deadlineMs);
+      if(previous.reason==='native_history_wait_budget_expired'||now()>=deadlineMs)return {status:'pending',reason:'native_history_wait_budget_expired'};
+      return readNativeHistory(intent,{startedAtMs,timeoutMs:Math.max(0,deadlineMs-now()),receiptGroupId,receiptBudgetDeadlineMs:deadlineMs});
+    }
+    if(group.requests.size>=2)return {status:'pending',reason:'native_history_attempt_limit'};
+    if(group.requests.size>0&&now()<group.secondReadAtMs)return {status:'pending',reason:'native_history_backoff',retryAfterMs:group.secondReadAtMs-now()};
+    const template=observedTemplate(uid);if(!template)return {status:'pending',reason:'native_history_template_unavailable'};
+    const flight={id:++nextRequestId,requestStartedAtMs:null,requiredStartedAtMs:startedAtMs,promise:null};
+    group.requests.add(flight.id);inFlight.set(uid,flight);
+    flight.promise=(async()=>{
+      let response;
+      try{
+        const observedHeaders=await withinBudget(template.request.allHeaders(),deadlineMs),headers={};
+        for(const [name,value]of Object.entries(observedHeaders||{}))if(!name.startsWith(':')&&!['host','cookie','content-length','connection','accept-encoding'].includes(name.toLowerCase()))headers[name]=value;
+        const remaining=Math.floor(deadlineMs-now());
+        if(!isActive()||remaining<=0||now()<flight.requiredStartedAtMs)return {status:'pending',reason:'native_history_budget_expired'};
+        flight.requestStartedAtMs=now();
+        response=await request.get(template.url,{headers,timeout:Math.max(1,remaining),maxRedirects:0,failOnStatusCode:false});
+        const httpStatus=response.status();
+        if(httpStatus!==200)return {status:'pending',reason:'native_history_http_status',httpStatus};
+        const body=await withinBudget(response.json(),deadlineMs),observedAtMs=now();
+        if(!isActive())return {status:'pending',reason:'native_transport_closed'};
+        const responseOk=validEnvelope(body);
+        nativeRecords.push({status:httpStatus,body,queryUserIds:[uid],responseOk,requestStartedAtMs:flight.requestStartedAtMs,receivedAtMs:observedAtMs,source:'native_history_get'});
+        if(nativeRecords.length>100)nativeRecords.splice(0,nativeRecords.length-100);
+        return {status:responseOk?'read':'pending',...(responseOk?{}:{reason:'native_history_envelope_invalid'}),requestStartedAtMs:flight.requestStartedAtMs,observedAtMs,httpStatus};
+      }catch{return {status:'pending',reason:now()>=deadlineMs?'native_history_budget_expired':'native_history_read_failed'};}
+      finally{
+        if(inFlight.get(uid)===flight)inFlight.delete(uid);
+        try{response?.dispose?.()?.catch?.(()=>{});}catch{}
+      }
+    })();
+    return waitForSharedRead(flight.promise,deadlineMs);
+  }
+
+  async function waitForReceipt(intent,{startedAtMs=0,timeoutMs=2000,receiptGroupId=null,receiptBudgetDeadlineMs=null}={}){
+    const deadline=now()+Math.max(0,timeoutMs);let lastReason;
+    while(isActive()){
+      const cached=peekReceipt(intent,{startedAtMs});if(cached.serverStatus==='confirmed')return cached;
+      if(now()>=deadline)return pending(lastReason||cached.reason);
+      const result=await readNativeHistory(intent,{startedAtMs,timeoutMs:Math.min(2000,Math.max(0,deadline-now())),receiptGroupId,receiptBudgetDeadlineMs});
+      lastReason=result.reason;
+      if(now()>=deadline)return pending('native_history_wait_budget_expired');
+      const fresh=peekReceipt(intent,{startedAtMs});if(fresh.serverStatus==='confirmed')return fresh;
+      const remaining=deadline-now();if(remaining<=0)return pending(lastReason||fresh.reason);
+      await sleep(Math.min(25,remaining,Number.isFinite(result.retryAfterMs)?Math.max(0,result.retryAfterMs):25));
+    }
+    return pending('native_transport_closed');
+  }
+  return {peekReceipt,readNativeHistory,waitForReceipt};
 }
 
 
@@ -214,20 +343,22 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
   const nativeRecords = [];
   const requestStarts = new WeakMap();
   page.on('request', request => {
-    if (request.url().includes(MESSAGE_ENDPOINT)) requestStarts.set(request, Date.now());
+    if (nativeHistoryRequestScope(request)) requestStarts.set(request, Date.now());
   });
   page.on('response', async response => {
     try {
       const request = response.request();
-      if (!response.url().includes(MESSAGE_ENDPOINT) || response.status() !== 200) return;
+      const scope=nativeHistoryRequestScope(request);if(!scope||response.status()!==200)return;
       const body = await response.json();
-      let queryUserIds=[];try{queryUserIds=new URL(request.url()).searchParams.getAll('customer_user_id');}catch{}
+      const queryUserIds=[scope.uid];
       const responseOk=body?.success===true&&body?.code===0&&Array.isArray(body?.data?.messages);
       nativeRecords.push({ request, status: response.status(), body, queryUserIds, responseOk, requestStartedAtMs: requestStarts.get(request) || 0, receivedAtMs: Date.now() });
       if (nativeRecords.length > 100) nativeRecords.splice(0, nativeRecords.length - 100);
     } catch {}
   });
   await waitForInbox(page, accountName);
+
+  const receiptReader=createNativeReceiptReader({accountId,card:cardConfig,nativeRecords,request:context.request,isActive:()=>!transport.crashed&&!transport.closed&&!page.isClosed()});
 
   let pendingText = null;
   const canSend=()=>!replySchedule||replySchedule.isAllowed()===true;
@@ -304,24 +435,9 @@ export async function openBrowser({ profileDir, headless = true, accountId, acco
     async prepareCard(scope,sourcePlatformTimeMs) { await assertActive(scope); const root=activeConversationRootLocator(page,scope); if(await root.count()!==1)throw new Error('exact_active_conversation_root_required'); assertNativeSendAllowed({canSend,replySchedule,sourcePlatformTimeMs});await prepareWeComCardPanel(root,cardConfig); await assertActive(scope); },
     async clickPreparedCard(scope,sourcePlatformTimeMs) { return clickPreparedWeComCard({page,scope,cardConfig,assertActive,canSend,replySchedule,sourcePlatformTimeMs}); },
     async sendCard(scope,sourcePlatformTimeMs) { return sendConfiguredWeComCard({ page, scope, cardConfig, assertActive, canSend,replySchedule,sourcePlatformTimeMs }); },
-    async waitForReceipt(intent, { startedAtMs = 0, timeoutMs = 2000 } = {}) { const deadline = Date.now() + timeoutMs;
-      while (Date.now() <= deadline) {
-        const candidates = nativeRecords.filter(record => record.requestStartedAtMs >= startedAtMs && record.responseOk === true &&
-          record.queryUserIds?.length === 1 && record.queryUserIds[0] === intent.conversationId)
-          .flatMap(record => deepFindMessages(record.body).filter(row => nativeMessageMatchesOutboundIntent(row,intent,startedAtMs,cardConfig))
-            .map(row => ({row,observedAtMs:record.receivedAtMs||Date.now()})));
-        const match = candidates.find(({row}) => (row.sixin_message.message_type || row.sixin_message.type) === (intent.kind === 'card' ? 'CARD' : 'TEXT'));
-        if (match) {
-          const message=match.row.sixin_message;
-          return { serverStatus: 'confirmed', accountId: intent.accountId, conversationId: intent.conversationId,
-            ...(intent.kind === 'card'?{type:'CARD',cardTitle:cardConfig.title}:{content:intent.content,type:'TEXT'}),
-            platformTimeMs: Number(message.created_at), observedAtMs: match.observedAtMs, visibleAtMs: null,
-            senderId: String(message.sender_id), receiverId: String(message.receiver_id), direction: 'OUTBOUND', nativeId: 'id_' + String(message.id) };
-        }
-        await new Promise(resolve => setTimeout(resolve, 25));
-      }
-      return { serverStatus: 'pending', observedAtMs: Date.now() };
-    },
+    peekReceipt:receiptReader.peekReceipt,
+    readNativeHistory:receiptReader.readNativeHistory,
+    waitForReceipt:receiptReader.waitForReceipt,
     async close() { await context.close(); },
   };
   return browser;

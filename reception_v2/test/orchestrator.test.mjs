@@ -123,11 +123,9 @@ test('live takeover failure retries silently instead of creating a card',async()
   const o=createOrchestrator({...f.orchestrator.deps,readSidebar:async()=>sidebar,sender,now:()=>now});
   try{await o.pollOnce();sidebar.rows=[{uid:u1,nickname:'甲',needsReply:true,platformAiActive:true,statusTags:['接待中'],time:'10:00:00'}];await o.pollOnce();assert.equal(f.state.cards.length,0);now+=3000;const retried=await o.pollOnce();assert.equal(attempts,2);assert.equal(retried.processed,1);assert.equal(f.state.cards.length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
-test('uncertain text and card are retried with different content until confirmed',async()=>{
-  const f=fixture();const calls=[];
-  const sender={enterHumanMode:async()=>({clicked:true}),sendTextAndCard:async()=>{calls.push('pair');return{state:'uncertain',text:{state:'uncertain'},card:{state:'uncertain'},withinTwoSeconds:false}},sendText:async(intentId)=>{calls.push('text-retry:'+f.store.getIntent(intentId).content);return{state:'sent',intent:{...f.store.getIntent(intentId),state:'sent'},withinTwoSeconds:true}},sendWeComCard:async(intentId)=>{calls.push('card-retry:'+JSON.stringify(f.store.getIntent(intentId).payload));return{state:'sent',intent:{...f.store.getIntent(intentId),state:'sent'},withinTwoSeconds:true}}};
-  const o=createOrchestrator({...f.orchestrator.deps,sender});
-  try{const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});assert.equal(result.text.state,'sent');assert.equal(result.card.state,'sent');assert.equal(calls.filter(x=>x.startsWith('text-retry:')).length,1);assert.equal(calls.filter(x=>x.startsWith('card-retry:')).length,1);assert.notEqual(f.store.listIntents(result.turn.turnId)[0].content,f.store.listIntents(result.turn.turnId)[2].content);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+test('uncertain text and card retain their original intents without any new send',async()=>{
+  const f=fixture();f.state.receiptFor=()=>({serverStatus:'pending',observedAtMs:2200});
+  try{const result=await f.orchestrator.processRow({uid:u1,nickname:'甲',needsReply:true});const intents=f.store.listIntents(result.turn.turnId);assert.equal(intents.length,2);assert.ok(intents.every(item=>item.state==='uncertain'));assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);assert.equal(f.state.calls.filter(x=>x==='card-send').length,1);assert.equal(result.state,'needs_human');await f.orchestrator.processRow({uid:u1,nickname:'甲',needsReply:true});assert.deepEqual(f.store.listIntents(result.turn.turnId).map(item=>item.intentId),intents.map(item=>item.intentId));assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 test('today card-click event gets one acknowledgement without another card',async()=>{
   const now=new Date(2026,9,28,10,0,0).getTime();const f=fixture();
@@ -213,11 +211,33 @@ test('closing reply window during send creates no retry intent',async()=>{
   try{const original=f.orchestrator.deps.sender;const pair=sender.sendTextAndCard;sender.sendTextAndCard=async(...args)=>{const result=await pair(...args);allowed=false;return result};const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});assert.equal(result.state,'needs_human');assert.equal(f.store.listIntents(result.turn.turnId).length,2);assert.equal(f.store.listIntents(result.turn.turnId).filter(i=>i.state==='prepared').length,0);}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
-test('window closing during text retry creates no prepared card retry',async()=>{
-  let allowed=true;const f=fixture();let textRetries=0,cardRetries=0;
-  const sender={enterHumanMode:async()=>({clicked:true}),sendTextAndCard:async(textId,cardId)=>{f.store.markSending(textId,2000);f.store.markUncertain(textId,{error:'pending'});f.store.markSending(cardId,2000);f.store.markUncertain(cardId,{error:'pending'});return{state:'uncertain',text:{state:'uncertain'},card:{state:'uncertain'},withinTwoSeconds:false,withinThreeSeconds:false}},sendText:async()=>{textRetries++;allowed=false;throw new Error('outside_reply_hours')},sendWeComCard:async()=>{cardRetries++;return{state:'sent'}}};
-  const o=createOrchestrator({...f.orchestrator.deps,sender,replySchedule:{isAllowed:()=>allowed,state:()=>({allowed,reason:allowed?'open':'closed'})}});
-  try{const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});const intents=f.store.listIntents(result.turn.turnId);assert.equal(textRetries,1);assert.equal(cardRetries,0);assert.equal(intents.filter(i=>i.kind==='card').length,1);assert.equal(intents.filter(i=>i.state==='prepared').length,0);assert.equal(intents.find(i=>i.kind==='text'&&i.intentId!==intents[0].intentId).state,'failed');}finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+test('a genuinely new source may receive distinct qualified text while old uncertain intents stay held',async()=>{
+  const f=fixture();let scope=f.scopeFor(u1);f.orchestrator.deps.selectConversation=async()=>scope;f.state.receiptFor=()=>({serverStatus:'pending',observedAtMs:2200});
+  try{const first=await f.orchestrator.processRow({uid:u1,nickname:'甲',needsReply:true});const held=f.store.listIntents(first.turn.turnId);assert.equal(held.length,2);
+    scope={...scope,messages:[...scope.messages,{nativeId:`jarvis-msg-${u1}.${accountId}.new-question`,direction:'left',type:'TEXT',text:'墨西哥卖家订单可以做吗',platformTimeMs:2000,isCustomerText:true}]};
+    f.orchestrator.deps.sender=createSender({store:f.store,browser:f.browser,now:()=>2800});
+    f.state.receiptFor=intent=>({serverStatus:'confirmed',accountId,conversationId:u1,content:intent.content,type:'TEXT',platformTimeMs:3000,observedAtMs:3200,senderId:accountId,receiverId:u1,direction:'OUTBOUND',nativeId:`id_${accountId}.${u1}.${intent.intentId}`});
+    const next=await f.orchestrator.processRow({uid:u1,nickname:'甲',needsReply:true});assert.notEqual(next.turn.turnId,first.turn.turnId);assert.equal(next.text.state,'sent');assert.equal(f.store.listIntents(next.turn.turnId).length,1);assert.notEqual(next.reply.text,first.reply.text);assert.deepEqual(f.store.listIntents(first.turn.turnId).map(item=>[item.intentId,item.state]),held.map(item=>[item.intentId,'uncertain']));assert.equal(f.state.calls.filter(x=>x==='card-send').length,1);
+  }finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('ambiguous native receipts do not authorize fresh text or card intents',async()=>{
+ const f=fixture();f.state.receiptFor=()=>({serverStatus:'pending',reason:'native_receipt_ambiguous',observedAtMs:2200});
+ try{const result=await f.orchestrator.processRow({uid:u1,nickname:'甲',needsReply:true});assert.equal(f.store.listIntents(result.turn.turnId).length,2);assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);assert.equal(f.state.calls.filter(x=>x==='card-send').length,1);assert.equal(result.state,'needs_human');}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('a possibly submitted text leaves its original unsubmitted card prepared and never creates retries',async()=>{
+ const f=fixture();f.browser.clickTextSend=async()=>{f.state.calls.push('text-send');throw new Error('submit_transport_timeout');};
+ try{const result=await f.orchestrator.processRow({uid:u1,nickname:'甲',needsReply:true});const intents=f.store.listIntents(result.turn.turnId);assert.equal(intents.length,2);assert.equal(intents.find(item=>item.kind==='text').state,'uncertain');assert.equal(intents.find(item=>item.kind==='card').state,'prepared');assert.equal(f.state.calls.filter(x=>x==='text-send').length,1);assert.equal(f.state.calls.filter(x=>x==='card-send').length,0);}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
+});
+
+for(const state of ['pending','ambiguous'])test(`an attempted ${state} outcome holds the original turn instead of claiming reception complete`,async()=>{
+ const f=fixture();const sender={...f.sender,sendTextAndCard:async(textId,cardId)=>{for(const id of [textId,cardId]){f.store.markSending(id,1800);f.store.markUncertain(id,{reason:state});}return{state,text:{state},card:{state}};}};
+ const o=createOrchestrator({...f.orchestrator.deps,sender});
+ try{const result=await o.processRow({uid:u1,nickname:'甲',needsReply:true});assert.equal(result.state,'needs_human');assert.equal(f.store.listIntents(result.turn.turnId).length,2);assert.ok(f.store.listIntents(result.turn.turnId).every(item=>item.state==='uncertain'));}
+ finally{f.store.close();fs.rmSync(f.dir,{recursive:true,force:true});}
 });
 
 
