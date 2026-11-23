@@ -30,6 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let runtime = runtimeDirectory()
     var panel: CardPanel?
     private var timer: Timer?
+    private var healthPanel: CardPanel?
+    private var shownIncident: String?
+    private var dismissedIncident: String?
+    private var dismissalURL: URL { runtime.appendingPathComponent("reception-v2-health-alert-dismissed.json") }
     var currentId: String?
     private var currentRevision: Data?
     var expandedRecord = false
@@ -39,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         dismissedIds = loadDismissedNotices(from: runtime.appendingPathComponent("reception-v2-dismissed-notices.json"))
         pendingAcknowledgements = loadPendingAcknowledgements(from: ackRequestURL)
+        dismissedIncident = loadDismissedNotices(from: dismissalURL).first
         NSApp.setActivationPolicy(.accessory)
         if let output = ProcessInfo.processInfo.environment["RECEPTION_POPUP_PREVIEW"] {
             guard let card = cards().first(where: {
@@ -90,7 +95,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch { return false }
     }
 
+    private func refreshHealthAlert() {
+        let url = runtime.appendingPathComponent("reception-v2-health.json")
+        guard let data = try? Data(contentsOf: url),
+              let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        guard let alert = receptionHealthAlert(status) else {
+            healthPanel?.orderOut(nil)
+            healthPanel = nil
+            shownIncident = nil
+            return
+        }
+        guard alert.incidentID != shownIncident, alert.incidentID != dismissedIncident else { return }
+        healthPanel?.orderOut(nil)
+        shownIncident = alert.incidentID
+        healthPanel = makeHealthPanel(alert)
+        healthPanel?.orderFrontRegardless()
+        NSSound(named: NSSound.Name("Glass"))?.play()
+        if healthPanel?.isVisible == true {
+            let event = "reception_health_alert_visible " + alert.kind + "\n"
+            FileHandle.standardError.write(Data(event.utf8))
+        }
+    }
+
+    func makeHealthPanel(_ alert: ReceptionHealthAlert) -> CardPanel {
+        let bounds = NSRect(x: 0, y: 0, width: 430, height: 176)
+        let window = CardPanel(contentRect: bounds, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        window.setFrameOrigin(NSPoint(x: screen.maxX - bounds.width - 24, y: screen.maxY - bounds.height - 24))
+        window.level = .statusBar
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.appearance = NSAppearance(named: .aqua)
+        window.backgroundColor = .white
+        window.hasShadow = true
+        let content = NSView(frame: bounds)
+        window.contentView = content
+        let title = NSTextField(labelWithString: alert.title)
+        title.font = .boldSystemFont(ofSize: 17)
+        title.textColor = .systemRed
+        title.frame = NSRect(x: 18, y: 132, width: 394, height: 25)
+        content.addSubview(title)
+        let time = DateFormatter()
+        time.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        time.dateFormat = "MM-dd HH:mm:ss"
+        let lastRead = alert.lastRead.map(time.string(from:)) ?? "暂无记录"
+        let message = NSTextField(wrappingLabelWithString: "最后成功读取  " + lastRead + "\n" + alert.action)
+        message.frame = NSRect(x: 18, y: 56, width: 394, height: 61)
+        content.addSubview(message)
+        let close = CardButton(title: "知道了", target: self, action: #selector(dismissHealthAlert(_:)))
+        close.frame = NSRect(x: 315, y: 15, width: 97, height: 29)
+        content.addSubview(close)
+        return window
+    }
+
+    @objc private func dismissHealthAlert(_ sender: NSButton) {
+        if let incident = shownIncident {
+            dismissedIncident = incident
+            try? saveDismissedNotices([incident], to: dismissalURL)
+        }
+        healthPanel?.orderOut(nil)
+        healthPanel = nil
+    }
+
     private func refresh() {
+        refreshHealthAlert()
         let currentCards = cards()
         pendingAcknowledgements = pendingAcknowledgements.filter { pendingId in
             !currentCards.contains { $0["noticeId"] as? String == pendingId && ($0["acknowledgedAt"] as? String) != nil }

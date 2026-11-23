@@ -16,6 +16,11 @@ struct NotifierNativeTest {
         let originalData = try JSONSerialization.data(withJSONObject: original)
         try originalData.write(to: file)
         let delegate = AppDelegate()
+        let alert = ReceptionHealthAlert(kind: "worker_stopped", title: "紧急：小红书自动接待已停止",
+                                         action: "检查后台服务", lastRead: nil)
+        let healthPanel = delegate.makeHealthPanel(alert)
+        precondition(!healthPanel.isVisible && !healthPanel.canBecomeKey && !healthPanel.canBecomeMain)
+        precondition(healthPanel.contentView?.subviews.contains { ($0 as? NSButton)?.title == "知道了" } == true)
         let card = delegate.makePanel(card: original[0])
         delegate.panel = card
         delegate.currentId = "native-a"

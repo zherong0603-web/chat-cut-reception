@@ -125,3 +125,40 @@ func compactReceptionLines(_ lines: [ReceptionDialogueLine]) -> [ReceptionDialog
     if let lastCustomer = lines.lastIndex(where: { $0.caption.hasPrefix("客户  ") }) { indexes.insert(lastCustomer) }
     return indexes.sorted().map { lines[$0] }
 }
+
+struct ReceptionHealthAlert {
+    let kind: String
+    let title: String
+    let action: String
+    let lastRead: Date?
+
+    var incidentID: String {
+        kind + ":" + (lastRead.map { String($0.timeIntervalSince1970) } ?? "none")
+    }
+}
+
+func receptionHealthAlert(_ status: [String: Any], now: Date = Date()) -> ReceptionHealthAlert? {
+    guard status["armed"] as? Bool == true else { return nil }
+    let clock = ISO8601DateFormatter()
+    func date(_ key: String) -> Date? {
+        guard let value = status[key] as? String else { return nil }
+        clock.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let parsed = clock.date(from: value) { return parsed }
+        clock.formatOptions = [.withInternetDateTime]
+        return clock.date(from: value)
+    }
+    let lastRead = date("last_successful_sidebar_read_at")
+    let issue: (String, String, String)
+    if status["error"] as? String == "auth_required" {
+        issue = ("auth_required", "紧急：小红书登录失效，自动接待已停止", "请从项目目录打开“重新登录小红书.command”，完成原账号验证。")
+    } else if status["running"] as? Bool == false {
+        issue = ("worker_stopped", "紧急：小红书自动接待已停止", "后台服务当前未运行，请查看接待自检。")
+    } else if date("last_tick_at_utc").map({ now.timeIntervalSince($0) > 90 }) ?? true {
+        issue = ("heartbeat_stalled", "紧急：小红书接待心跳中断", "后台状态已超过 90 秒未更新，请查看接待自检。")
+    } else if lastRead.map({ now.timeIntervalSince($0) > 90 }) ?? true {
+        // A new worker may need time to finish its initial read.
+        if lastRead == nil, let started = date("started_at_utc"), now.timeIntervalSince(started) <= 90 { return nil }
+        issue = ("sidebar_stalled", "紧急：小红书消息读取中断", "后台未取得新消息读取记录，请查看接待自检。")
+    } else { return nil }
+    return ReceptionHealthAlert(kind: issue.0, title: issue.1, action: issue.2, lastRead: lastRead)
+}
