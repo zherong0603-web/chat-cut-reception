@@ -157,15 +157,19 @@ export function createNativeReceiptReader({accountId,card=DEFAULT_CARD,nativeRec
     return null;
   }
 
+  function groupKey(intent, startedAtMs, receiptGroupId) {
+    return JSON.stringify([accountId, intent.conversationId, receiptGroupId || intent.intentId || `${intent.kind}:${startedAtMs}`]);
+  }
+
   function groupFor(intent,{startedAtMs,timeoutMs,receiptGroupId,receiptBudgetDeadlineMs}){
     if(!validIntent(intent)||!Number.isFinite(startedAtMs)||startedAtMs<=0||startedAtMs>now())return null;
-    const key=JSON.stringify([accountId,intent.conversationId,receiptGroupId||intent.intentId||`${intent.kind}:${startedAtMs}`]);
+    const key=groupKey(intent,startedAtMs,receiptGroupId);
     let group=groups.get(key);
     if(!group){
       for(const [other,item]of groups)if(item.deadlineMs<now())groups.delete(other);
       const requestedDeadline=Number.isFinite(receiptBudgetDeadlineMs)?receiptBudgetDeadlineMs:now()+Math.min(2000,Math.max(0,timeoutMs));
       const createdAtMs=now(),deadlineMs=Math.min(requestedDeadline,createdAtMs+2000);
-      group={deadlineMs,secondReadAtMs:createdAtMs+Math.min(1400,Math.floor(Math.max(0,deadlineMs-createdAtMs)*0.7)),requests:new Set()};groups.set(key,group);
+      group={deadlineMs,secondReadAtMs:createdAtMs+Math.min(1400,Math.floor(Math.max(0,deadlineMs-createdAtMs)*0.7)),requests:new Map()};groups.set(key,group);
     }
     return group;
   }
@@ -181,7 +185,7 @@ export function createNativeReceiptReader({accountId,card=DEFAULT_CARD,nativeRec
     if(existing){
       if(existing.requestStartedAtMs===null||existing.requestStartedAtMs>=startedAtMs){
         if(!group.requests.has(existing.id)&&group.requests.size>=2)return {status:'pending',reason:'native_history_attempt_limit'};
-        group.requests.add(existing.id);existing.requiredStartedAtMs=Math.max(existing.requiredStartedAtMs,startedAtMs);
+        group.requests.set(existing.id,existing);existing.requiredStartedAtMs=Math.max(existing.requiredStartedAtMs,startedAtMs);
         return waitForSharedRead(existing.promise,deadlineMs);
       }
       const previous=await waitForSharedRead(existing.promise,deadlineMs);
@@ -191,27 +195,38 @@ export function createNativeReceiptReader({accountId,card=DEFAULT_CARD,nativeRec
     if(group.requests.size>=2)return {status:'pending',reason:'native_history_attempt_limit'};
     if(group.requests.size>0&&now()<group.secondReadAtMs)return {status:'pending',reason:'native_history_backoff',retryAfterMs:group.secondReadAtMs-now()};
     const template=observedTemplate(uid);if(!template)return {status:'pending',reason:'native_history_template_unavailable'};
-    const flight={id:++nextRequestId,requestStartedAtMs:null,requiredStartedAtMs:startedAtMs,promise:null};
-    group.requests.add(flight.id);inFlight.set(uid,flight);
+    const flight={id:++nextRequestId,requestStartedAtMs:null,requiredStartedAtMs:startedAtMs,promise:null,reservedAtMs:now(),finishedAtMs:null,httpStatus:null,result:null};
+    group.requests.set(flight.id,flight);inFlight.set(uid,flight);
     flight.promise=(async()=>{
-      let response;
+      let response, stage='headers';
+      function finish(result, outcome=result) {
+        flight.result=result;
+        return outcome;
+      }
       try{
         const observedHeaders=await withinBudget(template.request.allHeaders(),deadlineMs),headers={};
         for(const [name,value]of Object.entries(observedHeaders||{}))if(!name.startsWith(':')&&!['host','cookie','content-length','connection','accept-encoding'].includes(name.toLowerCase()))headers[name]=value;
         const remaining=Math.floor(deadlineMs-now());
-        if(!isActive()||remaining<=0||now()<flight.requiredStartedAtMs)return {status:'pending',reason:'native_history_budget_expired'};
+        if(!isActive()||remaining<=0||now()<flight.requiredStartedAtMs)return finish('budget_expired',{status:'pending',reason:'native_history_budget_expired'});
         flight.requestStartedAtMs=now();
+        stage='request';
         response=await request.get(template.url,{headers,timeout:Math.max(1,remaining),maxRedirects:0,failOnStatusCode:false});
         const httpStatus=response.status();
-        if(httpStatus!==200)return {status:'pending',reason:'native_history_http_status',httpStatus};
+        flight.httpStatus=Number.isInteger(httpStatus)?httpStatus:null;
+        if(httpStatus!==200)return finish('http_status',{status:'pending',reason:'native_history_http_status',httpStatus});
+        stage='body';
         const body=await withinBudget(response.json(),deadlineMs),observedAtMs=now();
-        if(!isActive())return {status:'pending',reason:'native_transport_closed'};
+        if(!isActive())return finish('transport_closed',{status:'pending',reason:'native_transport_closed'});
         const responseOk=validEnvelope(body);
         nativeRecords.push({status:httpStatus,body,queryUserIds:[uid],responseOk,requestStartedAtMs:flight.requestStartedAtMs,receivedAtMs:observedAtMs,source:'native_history_get'});
         if(nativeRecords.length>100)nativeRecords.splice(0,nativeRecords.length-100);
-        return {status:responseOk?'read':'pending',...(responseOk?{}:{reason:'native_history_envelope_invalid'}),requestStartedAtMs:flight.requestStartedAtMs,observedAtMs,httpStatus};
-      }catch{return {status:'pending',reason:now()>=deadlineMs?'native_history_budget_expired':'native_history_read_failed'};}
+        return finish(responseOk?'read':'invalid_envelope',{status:responseOk?'read':'pending',...(responseOk?{}:{reason:'native_history_envelope_invalid'}),requestStartedAtMs:flight.requestStartedAtMs,observedAtMs,httpStatus});
+      }catch{
+        const expired=now()>=deadlineMs;
+        return finish(stage+(expired?'_timeout':'_failed'),{status:'pending',reason:expired?'native_history_budget_expired':'native_history_read_failed'});
+      }
       finally{
+        flight.finishedAtMs=now();
         if(inFlight.get(uid)===flight)inFlight.delete(uid);
         try{response?.dispose?.()?.catch?.(()=>{});}catch{}
       }
@@ -220,18 +235,30 @@ export function createNativeReceiptReader({accountId,card=DEFAULT_CARD,nativeRec
   }
 
   async function waitForReceipt(intent,{startedAtMs=0,timeoutMs=2000,receiptGroupId=null,receiptBudgetDeadlineMs=null}={}){
-    const deadline=now()+Math.max(0,timeoutMs);let lastReason;
+    const deadline=now()+Math.max(0,timeoutMs);let lastReason, match='not_observed';
+    function withDiagnostics(receipt) {
+      if (!validIntent(intent)) return receipt;
+      const group=groups.get(groupKey(intent,startedAtMs,receiptGroupId));
+      const attempts=Array.from(group?.requests.values()??[],flight=>({
+        reservedAtMs:flight.reservedAtMs,requestStartedAtMs:flight.requestStartedAtMs,
+        finishedAtMs:flight.finishedAtMs,httpStatus:flight.httpStatus,result:flight.result??'in_flight',
+      }));
+      if (receipt.serverStatus === 'confirmed') match='strict_match';
+      return {...receipt,historyDiagnostics:{attempts,match}};
+    }
     while(isActive()){
-      const cached=peekReceipt(intent,{startedAtMs});if(cached.serverStatus==='confirmed')return cached;
-      if(now()>=deadline)return pending(lastReason||cached.reason);
+      const cached=peekReceipt(intent,{startedAtMs});if(cached.serverStatus==='confirmed')return withDiagnostics(cached);
+      match=cached.reason==='native_receipt_ambiguous'?'ambiguous':'not_observed';
+      if(now()>=deadline)return withDiagnostics(pending(lastReason||cached.reason));
       const result=await readNativeHistory(intent,{startedAtMs,timeoutMs:Math.min(2000,Math.max(0,deadline-now())),receiptGroupId,receiptBudgetDeadlineMs});
       lastReason=result.reason;
-      if(now()>=deadline)return pending('native_history_wait_budget_expired');
-      const fresh=peekReceipt(intent,{startedAtMs});if(fresh.serverStatus==='confirmed')return fresh;
-      const remaining=deadline-now();if(remaining<=0)return pending(lastReason||fresh.reason);
+      if(now()>=deadline)return withDiagnostics(pending('native_history_wait_budget_expired'));
+      const fresh=peekReceipt(intent,{startedAtMs});if(fresh.serverStatus==='confirmed')return withDiagnostics(fresh);
+      match=fresh.reason==='native_receipt_ambiguous'?'ambiguous':'not_observed';
+      const remaining=deadline-now();if(remaining<=0)return withDiagnostics(pending(lastReason||fresh.reason));
       await sleep(Math.min(25,remaining,Number.isFinite(result.retryAfterMs)?Math.max(0,result.retryAfterMs):25));
     }
-    return pending('native_transport_closed');
+    return withDiagnostics(pending('native_transport_closed'));
   }
   return {peekReceipt,readNativeHistory,waitForReceipt};
 }

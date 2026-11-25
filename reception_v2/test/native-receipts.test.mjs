@@ -182,3 +182,26 @@ for(const method of ['readNativeHistory','waitForReceipt'])for(const sameGroup o
  }
  finally{release();clearTimeout(timer);clearTimeout(shortTimer);await long;await f.close();}
 });
+
+test('receipt diagnostics preserve failed headers and distinguish a completed GET without a receipt', async () => {
+  let clock = 100_000;
+  let headers = 0;
+  const template = observedRecord([], clock - 1000);
+  template.request.allHeaders = async () => {
+    if (++headers === 1) throw new Error('private diagnostic must not be persisted');
+    return {};
+  };
+  const reader = createNativeReceiptReader({
+    accountId, card, nativeRecords: [template], now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+    request: { get: async () => ({ status: () => 200, json: async () => envelope([]) }) },
+  });
+  const receipt = await reader.waitForReceipt(intent('card'), { startedAtMs: 99_950 });
+  assert.equal(receipt.serverStatus, 'pending');
+  assert.deepEqual(receipt.historyDiagnostics.attempts.map(a => [a.result, a.requestStartedAtMs !== null]), [
+    ['headers_failed', false], ['read', true],
+  ]);
+  assert.equal(receipt.historyDiagnostics.match, 'not_observed');
+  assert.doesNotMatch(JSON.stringify(receipt), /private diagnostic|https:/);
+  assert.ok(!JSON.stringify(receipt.historyDiagnostics).includes(uid));
+});

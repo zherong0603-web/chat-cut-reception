@@ -65,7 +65,9 @@ export function createSender({ store, browser, card = DEFAULT_CARD, now = Date.n
     const intent=store.getIntent(intentId);
     if(!verifyNativeHistory(intent,receipt,sourcePlatformTimeMs,startedAtMs,card))return null;
     const postedMs=receipt.platformTimeMs-sourcePlatformTimeMs,confirmationMs=receipt.observedAtMs-sourcePlatformTimeMs;
+    const initialHistoryDiagnostics=intent.payload?.receipt?.historyDiagnostics;
     const reconciled=store.markReconciledSent(intentId,{
+      ...(initialHistoryDiagnostics ? {initialHistoryDiagnostics} : {}),
       ...receipt,verified:true,reconciled:true,verificationAttempt,
       visibleElapsedMs:receipt.visibleAtMs?receipt.visibleAtMs-sourcePlatformTimeMs:null,
       [`${intent.kind}PostedMs`]:postedMs,[`${intent.kind}ConfirmedMs`]:confirmationMs,withinTwoSeconds:postedMs<=2000,withinThreeSeconds:postedMs<=3000,
