@@ -126,3 +126,43 @@ test('a stale health temp file cannot block the next publication',async()=>{
     try { await r.stop(); } finally { fs.rmSync(dir,{recursive:true,force:true}); }
   }
 });
+
+test('health publication logs one permission failure and one recovery without changing the old snapshot', async t => {
+  const dir = root();
+  const healthPath = path.join(dir, 'reception-v2-health.json');
+  const originalRename = fs.renameSync;
+  let denyPublication = false;
+  const log = t.mock.method(console, 'error', () => {});
+  t.mock.method(fs, 'renameSync', (source, target) => {
+    if (denyPublication && target === healthPath) {
+      throw Object.assign(new Error('permission denied at a private path'), { code: 'EPERM', syscall: 'rename' });
+    }
+    return originalRename(source, target);
+  });
+  const runtime = createRuntime({
+    runtimeDir: dir, accountId: 'a',
+    deps: { launchBrowser: async () => ({}), closeBrowser: async () => {}, readSidebar: async () => ({ rows: [] }) },
+  });
+  try {
+    await runtime.start();
+    const originalHealth = fs.readFileSync(healthPath, 'utf8');
+    denyPublication = true;
+    await assert.rejects(runtime.tick(), { code: 'EPERM' });
+    await assert.rejects(runtime.tick(), { code: 'EPERM' });
+    assert.equal(fs.readFileSync(healthPath, 'utf8'), originalHealth);
+    assert.deepEqual(log.mock.calls.map(call => JSON.parse(call.arguments[0])), [
+      { event: 'reception_health_write_failed', code: 'EPERM', syscall: 'rename' },
+    ]);
+
+    denyPublication = false;
+    await runtime.tick();
+    assert.equal(readHealth(dir).error, null);
+    assert.deepEqual(log.mock.calls.map(call => JSON.parse(call.arguments[0])), [
+      { event: 'reception_health_write_failed', code: 'EPERM', syscall: 'rename' },
+      { event: 'reception_health_write_recovered' },
+    ]);
+  } finally {
+    denyPublication = false;
+    try { await runtime.stop(); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+});

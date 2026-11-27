@@ -69,12 +69,29 @@ export function createRuntime({runtimeDir,accountId,armed=false,pilotOne=false,d
   if(pilotOne&&!armed)throw new Error('pilot_requires_armed_runtime');
   let release=initialRelease,browser=null,timer=null,startedAt=null,lastError=null,currentTick=null,lastSweep=null;
   const healthPath=path.join(runtimeDir,HEALTH);
+  let healthWriteFailed = false;
   function writeHealth({successfulRead=false,candidates=null,activeUid=null,sendState='idle',error=null,replyWindow=null}={}){
     const previous=readHealth(runtimeDir);const now=new Date().toISOString();
     const record={version:1,account_id:accountId,armed,running:Boolean(release),started_at_utc:startedAt,
       last_tick_at_utc:now,last_successful_sidebar_read_at:successfulRead?now:(previous?.last_successful_sidebar_read_at||null),
       candidates,active_uid:activeUid,send_state:sendState,reply_window:replyWindow||deps.replySchedule?.state?.()||null,error:error?String(error).replace(/[^A-Za-z0-9_:-]/g,'_').slice(0,120):null,recorded_at_utc:now};
-    atomicJson(healthPath,record);return record;
+    try {
+      atomicJson(healthPath, record);
+    } catch (error) {
+      if (!healthWriteFailed) {
+        healthWriteFailed = true;
+        // Do not log the exception message or file paths from the filesystem.
+        const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(error.code) ? error.code : null;
+        const syscall = typeof error?.syscall === 'string' && /^[a-z][a-z0-9_]{0,31}$/.test(error.syscall) ? error.syscall : null;
+        console.error(JSON.stringify({ event: 'reception_health_write_failed', code, syscall }));
+      }
+      throw error;
+    }
+    if (healthWriteFailed) {
+      healthWriteFailed = false;
+      console.error(JSON.stringify({ event: 'reception_health_write_recovered' }));
+    }
+    return record;
   }
   async function poll(){return armed&&deps.orchestrator?deps.orchestrator.pollOnce():deps.readSidebar();}
   async function ensureBrowser(){if(!browser)browser=await deps.launchBrowser();return browser;}
