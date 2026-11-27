@@ -1,5 +1,5 @@
 import { DEFAULT_CARD } from './account-config.mjs';
-import { ConversationState } from './domain.mjs';
+import { CARD_CLICK_ACK_TEXT, ConversationState } from './domain.mjs';
 import { platformTimeInReplyWindow, replyWindowStartMs, sidebarTimeInReplyWindow } from './reply-schedule.mjs';
 import { classifyIntent, isPeerProfile } from './responder.mjs';
 
@@ -123,7 +123,7 @@ export function createOrchestrator(deps) {
         if(!sourceTimeEligible(clickTime))return {state:'outside_inbound_reply_window',skipped:true};
         const clickTurn=deps.store.ingestInbound({accountId:scope.accountId,conversationId:scope.conversationId,eventId,text:'',type:'CARD_CLICK',platformTimeMs:clickTime,nickname:scope.nickname,minTurnOpenedAtMs:sourceWindowStart(),evidence:{source:'platform_ui',preview:row.preview}});
         if(!sourceTimeEligible(clickTurn.openedAtMs))return {state:'outside_inbound_reply_window',skipped:true};
-        const content='看到您点击企微卡了，客服小姐姐会在企微里回复您，请留意消息～';
+        const content=CARD_CLICK_ACK_TEXT;
         try{
           const intent=deps.store.createIntent({turnId:clickTurn.turnId,kind:'text',content});
           cardClickAck=await deps.sender.sendText(intent.intentId,scope,clickTurn.openedAtMs);
@@ -159,12 +159,14 @@ export function createOrchestrator(deps) {
         }
         if(!verified.length)return {contacts,candidates};
         deps.store.setConversationState(scoped.accountId, scoped.conversationId, ConversationState.CONTACT_OBTAINED);
-        const customerMessage=(scoped.messages||[]).filter(message=>message.isCustomerText===true).sort((a,b)=>a.platformTimeMs-b.platformTimeMs).at(-1);
+        const customerMessages = (scoped.messages || []).filter(message => message.isCustomerText === true)
+          .map(({ nativeId, platformTimeMs, text }) => ({ nativeId, platformTimeMs, text }));
+        const customerMessage = customerMessages.sort((a, b) => a.platformTimeMs - b.platformTimeMs).at(-1);
         const customerText=customerMessage?.text || '';
         await enqueue({ kind: 'ready_to_follow', accountId: scoped.accountId, conversationId: scoped.conversationId,
           customer: scoped.nickname || row.uid, need: customerText || '已进线客户',
           contact: verified.map(contactDisplay).join('；'),
-          completed: '已读取当前客户资料', next: '请销售马上联系客户', details: { contacts: verified, candidates, customerText, customerMessageTimeMs: customerMessage?.platformTimeMs ?? null, customerNativeId: customerMessage?.nativeId ?? null } });
+          completed: '已读取当前客户资料', next: '请销售马上联系客户', details: { contacts: verified, candidates, customerMessages, customerText, customerMessageTimeMs: customerMessage?.platformTimeMs ?? null, customerNativeId: customerMessage?.nativeId ?? null } });
         return { handled: { state: ConversationState.CONTACT_OBTAINED, contacts: verified } };
       };
       const firstContacts=preExcluded?{handled:null,contacts:[]}:await observeContacts(scope);if(firstContacts.handled)return {...firstContacts.handled,cardClickAck};

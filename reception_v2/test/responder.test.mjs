@@ -46,6 +46,16 @@ test('direct contact request sends a direct WeCom invitation', () => {
   assert.equal(reply.offerCard, true);
 });
 
+test('a customer chasing an unanswered support message gets an acknowledgment without another card', () => {
+  for (const customerText of ['客服没回我消息', '客服还没有上班吗？', '加了，企业微信客服没有回复']) {
+    const reply = composeReply({ customerText, facts, conversationId: 'support-followup' });
+    assert.match(reply.text, /久等/);
+    assert.doesNotMatch(reply.text, /加我|添加|已经转给|已经联系/);
+    assert.equal(reply.offerCard, false);
+    assert.equal(reply.needsHuman, true);
+  }
+});
+
 test('recognized service demand sends a direct WeCom invitation', () => {
   const intent = classifyIntent({ customerText: '转运', facts });
   assert.equal(intent.kind, 'service');

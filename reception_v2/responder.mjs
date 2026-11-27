@@ -8,6 +8,7 @@ const pricePattern = /(?:报价|价格|费用|多少钱|收费|运费|价钱)/;
 const contactPattern = /(?:电话|手机号|微信|vx|wechat|联系方式|联系我们|联系我|怎么联系)/i;
 const capabilityPattern = /(?:能不能|支持|可以|有.{0,6}仓|做不做|承接)/;
 const contactAddedPattern = /(?:^|[\s,，。.!！])(?:我)?(?:已经|已|刚)?(?:加(?:过了|过|了|上|入)?|添加(?:过|了)?)(?:企微|企业微信)?(?:了)?(?:[\s,，。.!！]|$)/;
+const supportWaitingPattern = /(?:客服|企微|企业微信|你们).{0,8}(?:还没|没有|没|未|不).{0,4}(?:回复|回我)|^(?:(?:你们?|客服)(?:都|还)?)?(?:还)?没(?:有)?上班(?:吗|么)?(?:还)?[吗么？?。！!\s]*$/;
 
 function customerContext(customerText, history) {
   const values=[String(customerText||'').trim()];
@@ -59,6 +60,7 @@ export function classifyIntent({ customerText, facts, history = [], nickname = '
   if (isRefusal(text)) return { kind: 'refusal', confidence: 1 };
   if (isPeerCooperation(context,nickname)) return { kind: 'peer_cooperation', confidence: 1 };
   if (isUnsupportedBusiness(context)) return { kind: 'unsupported_business', confidence: 1 };
+  if (text.split('\n').some(line => supportWaitingPattern.test(line.trim()))) return { kind: 'support_waiting', confidence: 1 };
   if (isContactAdded(text)) return { kind: 'contact_added', confidence: 1 };
   if (isPersonalShipping(text, facts, history)) return { kind: 'personal_shipping', confidence: 1 };
   if (isIdentityQuestion(text)) return { kind: 'identity', confidence: 1 };
@@ -100,6 +102,10 @@ export function composeReply({ customerText, facts, conversationId, avoidTexts =
   if (intent.kind === 'personal_shipping') return {
     text: '个人快递、个人包裹和个人转运业务我们目前不做，主要服务跨境电商卖家的美国、墨西哥海外仓、头程和一件代发等企业物流需求。',
     nextState: ConversationState.STOPPED, needsHuman: false, offerCard: false, intent,
+  };
+  if (intent.kind === 'support_waiting') return {
+    text: '让您久等了。我先把您还没收到回复的情况记下来。',
+    nextState: ConversationState.NEEDS_HUMAN, needsHuman: true, offerCard: false, intent,
   };
 
   const unsupportedRegion = unsupportedRegionInText(text, facts);

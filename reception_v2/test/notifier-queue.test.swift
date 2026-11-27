@@ -39,7 +39,8 @@ private func testDialoguePresentation() {
     precondition(recovered.lines.contains { $0.text == "本程序没有保存发送记录" })
     let oldReplies = (0..<10).map { ["role": "our", "text": "旧回复\($0)", "kind": "text", "timeMs": 5000, "status": "confirmed", "isAfterLatestCustomer": false] as [String: Any] }
     let oldDialogue = receptionCardPresentation(["timeline": ["messages": [["role": "customer", "text": "客户最后的问题", "timeMs": 1000, "status": "observed"]] + oldReplies]])
-    precondition(compactReceptionLines(oldDialogue.lines).contains { $0.text == "客户最后的问题" }, "compact card must keep latest customer speech")
+    precondition(oldDialogue.lines.count == 11, "conversation must keep every stored line")
+    precondition(oldDialogue.lines.contains { $0.text == "客户最后的问题" }, "card must keep latest customer speech")
     precondition(!oldDialogue.completed.contains("回复客户"), "old replies cannot count as answering the latest question")
     let unsafeLegacy = receptionCardPresentation(["fields": ["我已完成": "已发文字和企微卡"]])
     precondition(!unsafeLegacy.completed.contains("已发文字"), "legacy summaries cannot substitute for receipts")
@@ -59,4 +60,13 @@ private func testDialoguePresentation() {
     precondition(dialogue.lines[2].text.contains("未确认发出"))
     precondition(!dialogue.completed.contains("发送名片"), "uncertain card must not become a completed action")
     precondition(dialogue.completed.contains("回复客户"))
+
+    let states = receptionCardPresentation(["timeline": ["messages": [
+        ["role": "customer", "text": "问题一", "timeMs": 1795087425000, "replyStatus": "confirmed"],
+        ["role": "customer", "text": "问题二", "timeMs": 1795087426000, "replyStatus": "uncertain"],
+        ["role": "customer", "text": "最后一句", "timeMs": 1795087427000, "replyStatus": "no_record"]
+    ]]])
+    let customerStates = states.lines.filter { $0.caption.hasPrefix("客户  ") }
+    precondition(customerStates.map(\.caption).map { $0.components(separatedBy: " · ").last! } == ["已回复", "回复待核实", "本程序无回复记录"])
+    precondition(states.latestReplyStatus == "本程序无回复记录")
 }

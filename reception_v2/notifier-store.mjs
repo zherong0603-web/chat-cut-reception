@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { CARD_CLICK_ACK_TEXT } from './domain.mjs';
 
 const KINDS = new Set(['ready_to_follow']);
 const HIDDEN_KINDS = new Set(['needs_operator', 'send_failed']);
@@ -35,14 +36,34 @@ function localTime(ms) {
   if(!Number.isFinite(ms))return '时间未记录';
   return new Date(ms+8*3600_000).toISOString().replace('T',' ').slice(0,19)+'（北京时间）';
 }
+
+function transcriptText(value) {
+  return typeof value === 'string' && value.trim() ? value : '';
+}
+
 export function buildReceptionTimeline(db, accountId, uid, saved = {}) {
-  const inbound = db.prepare("SELECT DISTINCT e.event_id,e.platform_time_ms,i.text FROM events e LEFT JOIN turn_inbound_events i ON i.event_id=e.event_id AND i.turn_id IN (SELECT turn_id FROM turns WHERE account_id=e.account_id AND conversation_id=e.conversation_id) WHERE e.account_id=? AND e.conversation_id=? AND e.type='CUSTOMER_MESSAGE' ORDER BY e.platform_time_ms DESC,e.event_id DESC LIMIT 10").all(accountId, uid);
-  const rows = db.prepare("SELECT o.kind,o.state,o.content,o.evidence_json,o.submitted_at_ms,(SELECT json_group_array(event_id) FROM turn_inbound_events WHERE turn_id=o.turn_id) AS source_event_ids_json FROM outbox o WHERE o.account_id=? AND o.conversation_id=? ORDER BY o.created_at DESC LIMIT 10").all(accountId, uid).reverse();
-  const customers = inbound.filter(row => bounded(row.text)).map(row => ({
-    role: 'customer', text: bounded(row.text, 1200), timeMs: Number.isFinite(row.platform_time_ms) ? row.platform_time_ms : null,
+  const inbound = db.prepare("SELECT DISTINCT e.event_id,e.platform_time_ms,i.text FROM events e LEFT JOIN turn_inbound_events i ON i.event_id=e.event_id AND i.turn_id IN (SELECT turn_id FROM turns WHERE account_id=e.account_id AND conversation_id=e.conversation_id) WHERE e.account_id=? AND e.conversation_id=? AND e.type='CUSTOMER_MESSAGE' ORDER BY e.platform_time_ms,e.event_id").all(accountId, uid);
+  const rows = db.prepare("SELECT o.kind,o.state,o.content,o.evidence_json,o.submitted_at_ms,(SELECT json_group_array(event_id) FROM turn_inbound_events WHERE turn_id=o.turn_id) AS source_event_ids_json FROM outbox o WHERE o.account_id=? AND o.conversation_id=? ORDER BY o.created_at,o.intent_id").all(accountId, uid);
+  const customers = inbound.filter(row => transcriptText(row.text)).map(row => ({
+    role: 'customer', text: row.text, timeMs: Number.isFinite(row.platform_time_ms) ? row.platform_time_ms : null,
     nativeId: row.event_id, status: 'observed',
   }));
-  const savedText = bounded(saved.customerText || saved.customer_text, 1200);
+  const byNativeId = new Map(customers.filter(message => message.nativeId).map(message => [message.nativeId, message]));
+  for (const observed of Array.isArray(saved.customerMessages) ? saved.customerMessages : []) {
+    if (!observed?.nativeId || !transcriptText(observed.text)) continue;
+    const previous = byNativeId.get(observed.nativeId);
+    if (previous) {
+      if (Number.isFinite(observed.platformTimeMs) && previous.timeMs === observed.platformTimeMs) previous.text = observed.text;
+      continue;
+    }
+    const message = {
+      role: 'customer', text: observed.text, timeMs: Number.isFinite(observed.platformTimeMs) ? observed.platformTimeMs : null,
+      nativeId: observed.nativeId, status: 'observed',
+    };
+    customers.push(message);
+    byNativeId.set(message.nativeId, message);
+  }
+  const savedText = transcriptText(saved.customerText) || transcriptText(saved.customer_text);
   const savedMs = Number.isFinite(saved.customerMessageTimeMs) ? saved.customerMessageTimeMs : null;
   let independentUntimedSnapshot = null;
   if (savedText && !customers.some(message => saved.customerNativeId
@@ -50,19 +71,33 @@ export function buildReceptionTimeline(db, accountId, uid, saved = {}) {
     : savedMs !== null && message.text === savedText && message.timeMs === savedMs)) {
     const snapshot = {role: 'customer', text: savedText, timeMs: savedMs, nativeId: saved.customerNativeId || null, status: 'observed'};
     customers.push(snapshot);
+    if (snapshot.nativeId) byNativeId.set(snapshot.nativeId, snapshot);
     if (savedMs === null) independentUntimedSnapshot = snapshot;
   }
   const latestCustomer = independentUntimedSnapshot || customers.filter(message => message.timeMs !== null).sort((a, b) => b.timeMs - a.timeMs)[0] || customers.at(-1);
+  const replyPriority = { no_record: 0, prepared: 1, failed: 2, uncertain: 3, confirmed: 4 };
+  for (const message of customers) message.replyStatus = message.nativeId ? 'no_record' : 'unknown';
   const outgoing = rows.map(row => {
     let receipt = {}; try { receipt = JSON.parse(row.evidence_json || '{}'); } catch {}
-    const confirmed = row.state === 'sent' && receipt.verified === true;
-    const timeMs = confirmed && Number.isFinite(receipt.platformTimeMs) ? receipt.platformTimeMs : null;
+    const confirmed = row.state === 'sent' && receipt.verified === true && receipt.serverStatus === 'confirmed'
+      && Number.isFinite(receipt.platformTimeMs);
+    const timeMs = confirmed ? receipt.platformTimeMs : null;
     let sourceIds = []; try { sourceIds = JSON.parse(row.source_event_ids_json || '[]'); } catch {}
-    return {role: 'our', text: row.kind === 'card' ? '企业微信名片' : bounded(row.content, 1200), timeMs,
+    if (!Array.isArray(sourceIds)) sourceIds = [];
+    const confirmedAfter = message => confirmed && timeMs !== null && message?.timeMs != null && timeMs >= message.timeMs
+      && Number.isFinite(row.submitted_at_ms) && row.submitted_at_ms >= message.timeMs;
+    const questionReply = (row.kind === 'text' || row.kind === 'contact_fallback') && row.content !== CARD_CLICK_ACK_TEXT;
+    if (questionReply) {
+      for (const sourceId of sourceIds) {
+        const customer = byNativeId.get(sourceId);
+        if (!customer) continue;
+        const status = confirmedAfter(customer) ? 'confirmed' : ['prepared', 'failed'].includes(row.state) ? row.state : 'uncertain';
+        if (replyPriority[status] > replyPriority[customer.replyStatus]) customer.replyStatus = status;
+      }
+    }
+    return {role: 'our', text: row.kind === 'card' ? '企业微信名片' : transcriptText(row.content), timeMs,
       status: confirmed ? 'confirmed' : row.state, kind: row.kind,
-      isAfterLatestCustomer: confirmed && timeMs !== null && latestCustomer?.timeMs != null && timeMs >= latestCustomer.timeMs
-        && Number.isFinite(row.submitted_at_ms) && row.submitted_at_ms >= latestCustomer.timeMs
-        && Array.isArray(sourceIds) && sourceIds.includes(latestCustomer.nativeId)};
+      isAfterLatestCustomer: (questionReply || row.kind === 'card') && confirmedAfter(latestCustomer) && sourceIds.includes(latestCustomer.nativeId)};
   });
   const messages = [...customers, ...outgoing].sort((a, b) => (a.timeMs ?? Infinity) - (b.timeMs ?? Infinity));
   const sentMessages = outgoing.map(message => {
@@ -121,7 +156,26 @@ export function createNotifierStore(runtimeDir, { db = null } = {}) {
     await flushAcknowledgementsInner();
     const dedupeKey = [input.kind, input.accountId, input.conversationId, input.contact].join('\0');
     const cardsBefore = await read(); const duplicate = cardsBefore.find(card => card.dedupeKey === dedupeKey);
-    if (duplicate) return duplicate;
+    if (duplicate) {
+      const current = input.details?.customerMessageTimeMs;
+      const previous = duplicate.details?.customerMessageTimeMs;
+      const priorDetails = duplicate.details || {};
+      const currentId = input.details?.customerNativeId;
+      const alreadyObserved = currentId === priorDetails.customerNativeId || priorDetails.customerMessages?.some?.(message => message?.nativeId === currentId);
+      if (!Number.isFinite(current) || current < previous || (current === previous && (!currentId || alreadyObserved))) return duplicate;
+      const priorMessage = { nativeId: priorDetails.customerNativeId, platformTimeMs: previous, text: priorDetails.customerText };
+      const observations = new Map();
+      for (const details of [priorDetails, input.details]) {
+        for (const message of Array.isArray(details.customerMessages) ? details.customerMessages : []) {
+          if (message?.nativeId) observations.set(message.nativeId, message);
+        }
+      }
+      if (priorMessage.nativeId && !observations.has(priorMessage.nativeId)) observations.set(priorMessage.nativeId, priorMessage);
+      const refreshed = cardFor({ ...input, details: { ...input.details, customerMessages: [...observations.values()] } });
+      const updated = { ...refreshed, noticeId: duplicate.noticeId, createdAt: duplicate.createdAt, acknowledgedAt: duplicate.acknowledgedAt };
+      await write(cardsBefore.map(card => card.noticeId === duplicate.noticeId ? updated : card));
+      return updated;
+    }
     const card = cardFor(input);
     const cards = await read(); cards.push(card); await write(cards); return card;
   }); }

@@ -31,6 +31,7 @@ struct ReceptionCardPresentation {
     let customer: String
     let contact: String
     let openedAt: String
+    let latestReplyStatus: String?
     let lines: [ReceptionDialogueLine]
     let completed: String
     let next: String
@@ -59,11 +60,14 @@ func receptionCardPresentation(_ card: [String: Any]) -> ReceptionCardPresentati
     var lines: [ReceptionDialogueLine] = []
     let messages = timeline["messages"] as? [[String: Any]] ?? []
     var sentText = false, sentCard = false, hasOurRecord = false
+    var latestReplyStatus: String?
     for message in messages {
         guard let text = usefulPopupText(message["text"]) else { continue }
         let time = popupTime(message["timeMs"])
         if message["role"] as? String == "customer" {
-            lines.append(ReceptionDialogueLine(caption: "客户  " + time, text: text, isReceipt: false))
+            latestReplyStatus = popupCustomerReplyStatus(message["replyStatus"] as? String)
+            let status = latestReplyStatus.map { " · " + $0 } ?? ""
+            lines.append(ReceptionDialogueLine(caption: "客户  " + time + status, text: text, isReceipt: false))
         } else if message["role"] as? String == "our" {
             hasOurRecord = true
             let confirmed = message["status"] as? String == "confirmed"
@@ -99,10 +103,23 @@ func receptionCardPresentation(_ card: [String: Any]) -> ReceptionCardPresentati
         customer: usefulPopupText(fields["客户"]) ?? "客户名称未留存",
         contact: usefulPopupText(fields["联系方式"]) ?? "尚未获得联系方式",
         openedAt: usefulPopupText(timeline["openedAt"]) ?? "开口时间未留存",
+        latestReplyStatus: latestReplyStatus,
         lines: lines,
         completed: completed.isEmpty ? "尚无已确认操作" : completed.joined(separator: "、"),
         next: usefulPopupText(fields["下一步"]) ?? "查看客户情况"
     )
+}
+
+private func popupCustomerReplyStatus(_ status: String?) -> String? {
+    switch status {
+    case "confirmed": return "已回复"
+    case "uncertain": return "回复待核实"
+    case "failed": return "回复发送失败"
+    case "prepared": return "回复尚未发送"
+    case "no_record": return "本程序无回复记录"
+    case "unknown": return "回复关联未核实"
+    default: return nil
+    }
 }
 
 private func popupSendStatus(_ status: String?) -> String {
@@ -117,13 +134,6 @@ func loadPendingAcknowledgements(from url: URL) -> Set<String> {
     guard let data = try? Data(contentsOf: url),
           let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
     return Set(request["noticeIds"] as? [String] ?? [request["noticeId"] as? String].compactMap { $0 })
-}
-
-func compactReceptionLines(_ lines: [ReceptionDialogueLine]) -> [ReceptionDialogueLine] {
-    let start = max(0, lines.count - 6)
-    var indexes = Set(start..<lines.count)
-    if let lastCustomer = lines.lastIndex(where: { $0.caption.hasPrefix("客户  ") }) { indexes.insert(lastCustomer) }
-    return indexes.sorted().map { lines[$0] }
 }
 
 struct ReceptionHealthAlert {

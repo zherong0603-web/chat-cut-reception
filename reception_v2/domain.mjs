@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 
 export const TURN_WINDOW_MS = 800;
+export const CARD_CLICK_ACK_TEXT = '看到您点击企微卡了，客服小姐姐会在企微里回复您，请留意消息～';
 
 export const ConversationState = Object.freeze({
   CHATTING: 'chatting',

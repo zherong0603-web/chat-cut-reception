@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderCardText } from '../notifier-store.mjs';
+import { CARD_CLICK_ACK_TEXT } from '../domain.mjs';
 test('renderer displays five fields and hides details by default',()=>{
   const text=renderCardText({kind:'ready_to_follow',fields:{'客户':'Kusu','想了解':'美国仓报价','联系方式':'手机号 17300006725','我已完成':'已发文字和企微卡','下一步':'联系客户'},details:{customer_text:'报价多少'}});
   for(const value of ['可以跟进','Kusu','美国仓报价','17300006725','联系客户'])assert.match(text,new RegExp(value));
@@ -9,7 +10,7 @@ test('renderer displays five fields and hides details by default',()=>{
 test('receipt timeline includes exact customer time and distinguishes uncertain sends',async()=>{
  const {buildReceptionTimeline}=await import('../notifier-store.mjs');
  const db={prepare:sql=>({all:()=>sql.includes('FROM events')?[{text:'报价',platform_time_ms:Date.parse('2026-11-18T11:23:45Z'),evidence_json:'{"text":"报价"}'}]:[
- {kind:'text',state:'sent',content:'请加企微',evidence_json:'{"verified":true,"platformTimeMs":1795001040000}'},
+ {kind:'text',state:'sent',content:'请加企微',evidence_json:'{"verified":true,"serverStatus":"confirmed","platformTimeMs":1795001040000}'},
  {kind:'card',state:'uncertain',content:null,evidence_json:'{}'}
  ]})};
  const t=buildReceptionTimeline(db,'a','u');
@@ -34,7 +35,7 @@ test('fresh saved speech keeps its own text/time and history is chronological', 
  const db={prepare:sql=>({all:()=>sql.includes('FROM events')?[
   {event_id:'old-customer',text:'旧问题',platform_time_ms:2000},
   {event_id:'older-customer',text:'更旧的问题',platform_time_ms:1000}
- ]:[{kind:'text',state:'sent',content:'旧回复',evidence_json:'{"verified":true,"platformTimeMs":3000}'}]})};
+ ]:[{kind:'text',state:'sent',content:'旧回复',evidence_json:'{"verified":true,"serverStatus":"confirmed","platformTimeMs":3000}'}]})};
  const t=buildReceptionTimeline(db,'a','u',{customerText:'新问题',customerMessageTimeMs:5000,customerNativeId:'new-customer'});
  assert.equal(t.customerText,'新问题');
  assert.deepEqual(t.messages.map(m=>m.text),['更旧的问题','旧问题','旧回复','新问题']);
@@ -53,7 +54,7 @@ test('saved quote with no timestamp never borrows an older event timestamp', asy
 test('independent saved speech without time prevents old reply from claiming the new question', async()=>{
  const {buildReceptionTimeline}=await import('../notifier-store.mjs');
  const db={prepare:sql=>({all:()=>sql.includes('FROM events')?[{event_id:'old',text:'旧问题',platform_time_ms:2000}]:[
-  {kind:'text',state:'sent',content:'旧回复',submitted_at_ms:2500,source_event_ids_json:'["old"]',evidence_json:'{"verified":true,"platformTimeMs":3000}'}]})};
+  {kind:'text',state:'sent',content:'旧回复',submitted_at_ms:2500,source_event_ids_json:'["old"]',evidence_json:'{"verified":true,"serverStatus":"confirmed","platformTimeMs":3000}'}]})};
  const t=buildReceptionTimeline(db,'a','u',{customerText:'没有时间的新问题',customerNativeId:'new'});
  assert.equal(t.customerText,'没有时间的新问题');
  assert.equal(t.openedAt,'开口时间未留存');
@@ -63,8 +64,8 @@ test('independent saved speech without time prevents old reply from claiming the
 test('late confirmation of an old intent cannot count as a reply to a new question', async()=>{
  const {buildReceptionTimeline}=await import('../notifier-store.mjs');
  const db={prepare:sql=>({all:()=>sql.includes('FROM events')?[{event_id:'new',text:'新问题',platform_time_ms:5000}]:[
-  {kind:'text',state:'sent',content:'旧操作晚确认',submitted_at_ms:1000,source_event_ids_json:'["old"]',evidence_json:'{"verified":true,"platformTimeMs":6000}'},
-  {kind:'text',state:'sent',content:'新问题的回复',submitted_at_ms:7000,source_event_ids_json:'["new"]',evidence_json:'{"verified":true,"platformTimeMs":8000}'}]})};
+  {kind:'text',state:'sent',content:'旧操作晚确认',submitted_at_ms:1000,source_event_ids_json:'["old"]',evidence_json:'{"verified":true,"serverStatus":"confirmed","platformTimeMs":6000}'},
+  {kind:'text',state:'sent',content:'新问题的回复',submitted_at_ms:7000,source_event_ids_json:'["new"]',evidence_json:'{"verified":true,"serverStatus":"confirmed","platformTimeMs":8000}'}]})};
  const t=buildReceptionTimeline(db,'a','u');
  assert.equal(t.messages.find(m=>m.text==='旧操作晚确认').isAfterLatestCustomer,false);
  assert.equal(t.messages.find(m=>m.text==='新问题的回复').isAfterLatestCustomer,true);
@@ -73,10 +74,38 @@ test('late confirmation of an old intent cannot count as a reply to a new questi
 test('identical speech with a new native ID remains an independent untimed customer question', async()=>{
  const {buildReceptionTimeline}=await import('../notifier-store.mjs');
  const db={prepare:sql=>({all:()=>sql.includes('FROM events')?[{event_id:'old',text:'报价',platform_time_ms:2000}]:[
-  {kind:'text',state:'sent',content:'针对旧问题',submitted_at_ms:2500,source_event_ids_json:'["old"]',evidence_json:'{"verified":true,"platformTimeMs":3000}'}]})};
+  {kind:'text',state:'sent',content:'针对旧问题',submitted_at_ms:2500,source_event_ids_json:'["old"]',evidence_json:'{"verified":true,"serverStatus":"confirmed","platformTimeMs":3000}'}]})};
  const t=buildReceptionTimeline(db,'a','u',{customerText:'报价',customerNativeId:'new'});
  assert.equal(t.openedAt,'开口时间未留存');
  assert.equal(t.messages.filter(m=>m.role==='customer').length,2);
  assert.equal(t.messages.find(m=>m.nativeId==='new').timeMs,null);
  assert.equal(t.messages.find(m=>m.role==='our').isAfterLatestCustomer,false);
+});
+
+test('conversation shows each original line and only credits replies linked to that customer message', async () => {
+  const { buildReceptionTimeline } = await import('../notifier-store.mjs');
+  const originalText = '原话第一行\n' + '完整保留'.repeat(320);
+  const db = {
+    prepare: sql => ({ all: () => sql.includes('FROM events') ? [
+      { event_id: 'answered', text: '历史库已整理的文字', platform_time_ms: 2000 },
+      { event_id: 'waiting', text: '第二个问题', platform_time_ms: 4000 },
+    ] : [
+      { kind: 'text', state: 'sent', content: '答复', submitted_at_ms: 2100, source_event_ids_json: '["answered"]', evidence_json: '{"verified":true,"serverStatus":"confirmed","platformTimeMs":3000}' },
+      { kind: 'text', state: 'uncertain', content: '发送待核实', submitted_at_ms: 4100, source_event_ids_json: '["waiting"]', evidence_json: '{}' },
+      { kind: 'card', state: 'sent', submitted_at_ms: 5100, source_event_ids_json: '["latest"]', evidence_json: '{"verified":true,"serverStatus":"confirmed","platformTimeMs":5200}' },
+      { kind: 'text', state: 'sent', content: CARD_CLICK_ACK_TEXT, submitted_at_ms: 5300, source_event_ids_json: '["latest"]', evidence_json: '{"verified":true,"serverStatus":"confirmed","platformTimeMs":5400}' },
+    ] }),
+  };
+  const timeline = buildReceptionTimeline(db, 'a', 'u', {
+    customerText: '第三个问题', customerMessageTimeMs: 5000, customerNativeId: 'latest',
+    customerMessages: [{ nativeId: 'answered', platformTimeMs: 2000, text: originalText }],
+  });
+  assert.deepEqual(timeline.messages.filter(message => message.role === 'customer').map(message => [message.text, message.replyStatus]), [
+    [originalText, 'confirmed'],
+    ['第二个问题', 'uncertain'],
+    ['第三个问题', 'no_record'],
+  ]);
+  const clickAck = timeline.messages.find(message => message.text === CARD_CLICK_ACK_TEXT);
+  assert.equal(clickAck.status, 'confirmed');
+  assert.equal(clickAck.isAfterLatestCustomer, false);
 });

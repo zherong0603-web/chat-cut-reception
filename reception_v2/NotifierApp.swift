@@ -210,10 +210,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status.alignment = .right
         document.addSubview(status)
         cursor += max(nameHeight, statusHeight) + 5
-        text(presentation.openedAt.replacingOccurrences(of: "（北京时间）", with: " · 北京时间"), size: 12, color: secondary, gap: 20)
-        let visibleLines = expandedRecord ? presentation.lines : compactReceptionLines(presentation.lines)
-        if visibleLines.count < presentation.lines.count { text("更早的对话见完整记录", size: 12, color: secondary) }
-        for line in visibleLines {
+        text(presentation.openedAt.replacingOccurrences(of: "（北京时间）", with: " · 北京时间"), size: 12, color: secondary, gap: 8)
+        if let status = presentation.latestReplyStatus {
+            text("最后一句 · " + status, size: 13, weight: .semibold, gap: 14)
+        } else {
+            cursor += 12
+        }
+        for line in presentation.lines {
             if line.isReceipt {
                 text(line.caption + "  " + line.text, size: 12, color: secondary, gap: 18)
             } else {

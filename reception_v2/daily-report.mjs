@@ -3,11 +3,10 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { loadAccountConfig } from './account-config.mjs';
+import { CARD_CLICK_ACK_TEXT } from './domain.mjs';
 
 const DAY_MS=24*60*60*1000;
 const EVENING_START_MS=18*60*60*1000;
-// Historical outbox rows lack a purpose field. Match the exact orchestrator acknowledgment.
-const CARD_CLICK_ACK_TEXT='看到您点击企微卡了，客服小姐姐会在企微里回复您，请留意消息～';
 const SHANGHAI_OFFSET_MS=8*60*60*1000;
 
 export function shanghaiDayRange(date) {
