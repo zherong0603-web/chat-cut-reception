@@ -125,7 +125,9 @@ export function createNativeReceiptReader({accountId,card=DEFAULT_CARD,nativeRec
     for(const record of nativeRecords){
       if(record.status!==200||record.responseOk!==true||!validEnvelope(record.body)||record.queryUserIds?.length!==1||record.queryUserIds[0]!==intent.conversationId||
           !Number.isFinite(record.requestStartedAtMs)||record.requestStartedAtMs<startedAtMs||!Number.isFinite(record.receivedAtMs)||record.receivedAtMs<record.requestStartedAtMs||record.receivedAtMs>now())continue;
-      if(record.source!=='native_history_get'&&!nativeHistoryRequestScope(record.request,intent.conversationId))continue;
+      const isActiveHistoryRead=record.source==='native_history_get';
+      if(!isActiveHistoryRead&&!nativeHistoryRequestScope(record.request,intent.conversationId))continue;
+      const nativeHistorySource=isActiveHistoryRead?'active_history_get':'page_history_response';
       for(const row of record.body.data.messages){
         if(!row||typeof row!=='object'||!row.sixin_message||typeof row.sixin_message!=='object')continue;
         const message=row.sixin_message,nativeId='id_'+String(message.id),platformTimeMs=Number(message.created_at);
@@ -137,7 +139,7 @@ export function createNativeReceiptReader({accountId,card=DEFAULT_CARD,nativeRec
         if(signatures.has(nativeId)&&signatures.get(nativeId)!==signature)conflicting.add(nativeId);else signatures.set(nativeId,signature);
         if(!nativeMessageMatchesOutboundIntent(row,intent,startedAtMs,card)||platformTimeMs>record.receivedAtMs+1000)continue;
         const previous=matches.get(nativeId);
-        if(!previous||record.receivedAtMs<previous.observedAtMs)matches.set(nativeId,{observedAtMs:record.receivedAtMs,message});
+        if(!previous||record.receivedAtMs<previous.observedAtMs)matches.set(nativeId,{observedAtMs:record.receivedAtMs,message,nativeHistorySource});
       }
     }
     const hasConflict=Array.from(matches.keys()).some(id=>conflicting.has(id));
@@ -146,6 +148,7 @@ export function createNativeReceiptReader({accountId,card=DEFAULT_CARD,nativeRec
     return {serverStatus:'confirmed',accountId:intent.accountId,conversationId:intent.conversationId,
       ...(intent.kind==='card'?{type:'CARD',cardTitle:card.title}:{type:'TEXT',content:intent.content}),
       platformTimeMs:Number(message.created_at),observedAtMs:match.observedAtMs,visibleAtMs:null,
+      nativeHistorySource:match.nativeHistorySource,
       senderId:String(message.sender_id),receiverId:String(message.receiver_id),direction:'OUTBOUND',nativeId};
   }
 

@@ -34,6 +34,8 @@ test('fresh observed native GET confirms text and card through one shared read',
  try{
   const [text,cardReceipt]=await Promise.all([f.browser.waitForReceipt(intent('text'),{startedAtMs:base-100,timeoutMs:50,receiptGroupId:'pair-1'}),f.browser.waitForReceipt(intent('card'),{startedAtMs:base-80,timeoutMs:50,receiptGroupId:'pair-1'})]);
   assert.equal(text.serverStatus,'confirmed');assert.equal(cardReceipt.serverStatus,'confirmed');assert.equal(f.requests.length,1);
+  assert.equal(text.nativeHistorySource,'active_history_get');
+  assert.equal(cardReceipt.nativeHistorySource,'active_history_get');
   assert.equal(cardReceipt.cardTitle,card.title);assert.ok(cardReceipt.observedAtMs>=f.requests[0].startedAtMs);
   assert.deepEqual(Object.keys(f.requests[0].options.headers),['accept']);assert.equal(f.requests[0].options.maxRedirects,0);assert.equal(f.requests[0].options.failOnStatusCode,false);assert.ok(f.requests[0].options.timeout<=50);
  }
@@ -52,7 +54,16 @@ test('a same-group missing native receipt makes at most two bounded GETs',async(
 test('strict cached duplicates retain the real first observation and need no GET',async()=>{
  const base=Date.now(),f=await fixture();f.addTemplate();
  f.browser.nativeRecords.push(observedRecord([nativeRow('text',base-50)],base),observedRecord([nativeRow('text',base-50)],base+10));
- try{const receipt=await f.browser.waitForReceipt(intent('text'),{startedAtMs:base-100,timeoutMs:30});assert.equal(receipt.serverStatus,'confirmed');assert.equal(receipt.observedAtMs,base-20);assert.equal(f.requests.length,0);}
+ try {
+  const scope={startedAtMs:base-100,timeoutMs:30};
+  const cached=f.browser.peekReceipt(intent('text'),scope);
+  const receipt=await f.browser.waitForReceipt(intent('text'),scope);
+  assert.equal(receipt.serverStatus,'confirmed');
+  assert.equal(cached.nativeHistorySource,'page_history_response');
+  assert.equal(receipt.nativeHistorySource,'page_history_response');
+  assert.equal(receipt.observedAtMs,base-20);
+  assert.equal(f.requests.length,0);
+ }
  finally{await f.close();}
 });
 
